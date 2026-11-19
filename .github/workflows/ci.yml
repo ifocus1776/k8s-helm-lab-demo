@@ -1,0 +1,301 @@
+---
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # =========================================================================
+  # LINT: Static analysis of all YAML, Ansible, and Helm manifests
+  # =========================================================================
+  lint:
+    name: 🔍 Lint (YAML, Ansible, Helm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Install Ansible collections
+        run: |
+          cd ansible
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.2.0
+        with:
+          version: v3.22.1
+
+      - name: Install kubeconform
+        run: |
+          KUBECONFORM_VERSION=0.7.0
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      - name: Run yamllint
+        run: |
+          yamllint -s .
+
+      - name: Run ansible-lint
+        run: |
+          cd ansible
+          ansible-lint
+
+      - name: Ansible syntax check (site.yml)
+        run: |
+          cd ansible
+          ansible-playbook site.yml --syntax-check
+
+      - name: Ansible syntax check (teardown.yml)
+        run: |
+          cd ansible
+          ansible-playbook teardown.yml --syntax-check
+
+      - name: Ansible syntax check (advanced-kubeadm)
+        run: |
+          cd advanced-kubeadm
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+          ansible-playbook site.yml --syntax-check
+          ansible-playbook reset.yml --syntax-check
+
+      - name: Helm lint (default values)
+        run: |
+          helm lint --strict charts/hello-lab
+
+      - name: Helm lint (dev values)
+        run: |
+          helm lint --strict charts/hello-lab -f charts/hello-lab/values-dev.yaml
+
+      - name: Helm lint (prod values)
+        run: |
+          helm lint --strict charts/hello-lab -f charts/hello-lab/values-prod.yaml
+
+      - name: Helm template + schema validation (default)
+        run: |
+          helm template hello-lab charts/hello-lab | \
+            kubeconform -strict -summary -ignore-missing-schemas
+
+      - name: Helm template + schema validation (dev)
+        run: |
+          helm template hello-lab charts/hello-lab -f charts/hello-lab/values-dev.yaml | \
+            kubeconform -strict -summary -ignore-missing-schemas
+
+      - name: Helm template + schema validation (prod)
+        run: |
+          helm template hello-lab charts/hello-lab -f charts/hello-lab/values-prod.yaml | \
+            kubeconform -strict -summary -ignore-missing-schemas
+
+  # =========================================================================
+  # INTEGRATION: Full end-to-end test on ubuntu-latest with k3s
+  # =========================================================================
+  integration:
+    name: 🚀 Integration Test (k3s on ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Ansible collections
+        run: |
+          cd ansible
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+
+      - name: Configure passwordless sudo
+        run: |
+          echo "$USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/runner
+
+      - name: Run Ansible playbook (install k3s + kubectl + helm)
+        run: |
+          cd ansible
+          ansible-playbook site.yml --extra-vars "deploy_sample_app=false"
+        env:
+          ANSIBLE_FORCE_COLOR: '1'
+
+      - name: Verify k3s cluster is ready
+        run: |
+          kubectl get nodes -o wide
+          kubectl get pods -A
+          kubectl version
+
+      - name: Deploy the chart (default values)
+        run: |
+          helm upgrade --install hello-lab charts/hello-lab \
+            -n demo --create-namespace --wait --timeout 3m
+          kubectl -n demo get all
+
+      - name: Run Helm test
+        run: |
+          helm test hello-lab -n demo
+
+      - name: Verify deployment responds (curl ingress)
+        run: |
+          # Wait for ingress to be ready
+          kubectl -n demo wait --for=condition=ready pod -l app.kubernetes.io/name=hello-lab --timeout=60s
+
+          # Get the service cluster IP and test it
+          SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
+          echo "Service IP: $SERVICE_IP"
+
+          # Test the service endpoint
+          kubectl run curl-test-1 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
+            curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from Helm"
+
+      - name: Show Helm history (initial)
+        run: |
+          helm history hello-lab -n demo
+
+      - name: Upgrade to dev values
+        run: |
+          helm upgrade hello-lab charts/hello-lab \
+            -n demo -f charts/hello-lab/values-dev.yaml --wait --timeout 3m
+          kubectl -n demo rollout status deployment/hello-lab
+
+      - name: Verify dev deployment
+        run: |
+          SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
+          kubectl run curl-test-2 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
+            curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from DEV"
+
+      - name: Show Helm history (after upgrade)
+        run: |
+          helm history hello-lab -n demo
+
+      - name: Upgrade to prod values
+        run: |
+          helm upgrade hello-lab charts/hello-lab \
+            -n demo -f charts/hello-lab/values-prod.yaml --wait --timeout 3m
+          kubectl -n demo rollout status deployment/hello-lab
+
+      - name: Verify prod deployment (HPA and PDB enabled)
+        run: |
+          kubectl -n demo get hpa
+          kubectl -n demo get pdb
+          # Verify HPA exists
+          kubectl -n demo get hpa hello-lab
+          # Verify PDB exists
+          kubectl -n demo get pdb hello-lab
+
+      - name: Show Helm history (after second upgrade)
+        run: |
+          helm history hello-lab -n demo
+
+      - name: Rollback to previous revision
+        run: |
+          helm rollback hello-lab -n demo --wait --timeout 3m
+          kubectl -n demo rollout status deployment/hello-lab
+
+      - name: Show Helm history (after rollback)
+        run: |
+          helm history hello-lab -n demo
+
+      - name: Verify rollback worked (should be back to dev)
+        run: |
+          SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
+          kubectl run curl-test-3 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
+            curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from DEV"
+
+      - name: Show final cluster state
+        run: |
+          helm status hello-lab -n demo
+          kubectl -n demo get deploy,pods,svc,ingress,hpa,pdb -o wide
+
+      - name: Teardown k3s
+        if: always()
+        run: |
+          cd ansible
+          ansible-playbook teardown.yml
+
+      - name: Verify teardown
+        if: always()
+        run: |
+          if [ -f /usr/local/bin/k3s-uninstall.sh ]; then
+            echo "ERROR: k3s-uninstall.sh still exists"
+            exit 1
+          fi
+          echo "Teardown successful"
+
+  # =========================================================================
+  # HELM-ONLY: Fast validation on kind cluster (optional sanity check)
+  # =========================================================================
+  helm-kind:
+    name: ⚡ Helm Test (kind cluster)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.2.0
+        with:
+          version: v3.22.1
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: helm-test
+          version: v0.26.0
+
+      - name: Deploy chart with default values
+        run: |
+          helm upgrade --install hello-lab charts/hello-lab \
+            -n demo --create-namespace --wait --timeout 2m
+          kubectl -n demo get all
+
+      - name: Run Helm test
+        run: |
+          helm test hello-lab -n demo
+
+      - name: Deploy with dev values
+        run: |
+          helm upgrade hello-lab charts/hello-lab \
+            -n demo -f charts/hello-lab/values-dev.yaml --wait --timeout 2m
+
+      - name: Deploy with prod values
+        run: |
+          helm upgrade hello-lab charts/hello-lab \
+            -n demo -f charts/hello-lab/values-prod.yaml --wait --timeout 2m
+
+      - name: Verify prod features (HPA, PDB)
+        run: |
+          kubectl -n demo get hpa hello-lab
+          kubectl -n demo get pdb hello-lab
+
+      - name: Rollback test
+        run: |
+          helm rollback hello-lab -n demo --wait
+          helm history hello-lab -n demo
+
+      - name: Final cluster state
+        run: |
+          kubectl get nodes
+          kubectl -n demo get all

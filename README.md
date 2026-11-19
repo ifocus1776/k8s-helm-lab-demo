@@ -1,5 +1,7 @@
 # Kubernetes + Helm Desktop Lab (k3s on Debian)
 
+[![CI/CD Pipeline](https://github.com/ifocus1776/k8s-helm-lab-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/ifocus1776/k8s-helm-lab-demo/actions/workflows/ci.yml)
+
 A self-contained training kit that shows developers **what Kubernetes is** and **why infrastructure as code (IaC) matters**, by building a single-node cluster with Ansible and deploying an app with a Helm chart.
 
 - `ansible/`: playbook that installs **k3s**, **kubectl** and **Helm** (pinned versions, SHA-256 verified), writes your kubeconfig, waits for the node to be Ready, and can optionally deploy the chart.
@@ -48,6 +50,16 @@ make lab-down         # remove everything
 ```
 
 Deploy the app from Ansible instead of by hand: `make lab-up DEPLOY=true` (uses `kubernetes.core.helm`, then runs `helm test`).
+
+## CI/CD Pipeline
+
+The repository includes a comprehensive GitHub Actions pipeline (`.github/workflows/ci.yml`) that proves the demo works end-to-end on GitHub-hosted runners:
+
+- **🔍 Lint Job**: Static analysis with yamllint, ansible-lint, helm lint, and kubeconform schema validation
+- **🚀 Integration Test**: Full k3s installation on ubuntu-latest, followed by deploy → helm test → upgrade (dev → prod) → rollback → teardown verification
+- **⚡ Helm-Kind Test**: Fast validation on a kind cluster for quick feedback
+
+All action versions are pinned for reproducibility. The workflow runs on push to main, pull requests, and can be triggered manually. Perfect for showcasing CI/CD best practices in the demo!
 
 ## Make targets
 
