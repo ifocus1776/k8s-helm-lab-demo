@@ -264,7 +264,6 @@ jobs:
         with:
           cluster_name: helm-test
           version: v0.26.0
-          kubectl_version: v1.36.6
 
       - name: Deploy chart with default values
         run: |
