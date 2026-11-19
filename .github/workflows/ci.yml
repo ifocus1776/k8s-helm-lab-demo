@@ -166,7 +166,7 @@ jobs:
           echo "Service IP: $SERVICE_IP"
 
           # Test the service endpoint
-          kubectl run curl-test --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
+          kubectl run curl-test-1 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
             curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from Helm"
 
       - name: Show Helm history (initial)
@@ -182,7 +182,7 @@ jobs:
       - name: Verify dev deployment
         run: |
           SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
-          kubectl run curl-test --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
+          kubectl run curl-test-2 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
             curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from DEV"
 
       - name: Show Helm history (after upgrade)
@@ -220,7 +220,7 @@ jobs:
       - name: Verify rollback worked (should be back to dev)
         run: |
           SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
-          kubectl run curl-test --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
+          kubectl run curl-test-3 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
             curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from DEV"
 
       - name: Show final cluster state
