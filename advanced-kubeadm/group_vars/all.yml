@@ -1,0 +1,44 @@
+---
+# ---------------------------------------------------------------------------
+# Versions: verified 2026-11-18 (America/Phoenix) against official sources:
+#   Kubernetes v1.37.2  https://dl.k8s.io/release/stable.txt  and the pkgs.k8s.io v1.37 package index (1.37.2-1.1)
+#   Calico v3.33.1      https://github.com/projectcalico/calico/releases (latest, 2026-11-16; tested with k8s 1.35-1.37
+#                        per docs.tigera.io system requirements)
+#   Tigera operator v1.44.1  image tag inside calico v3.33.1 manifests/tigera-operator.yaml
+#   containerd.io 2.4.x  download.docker.com Debian bookworm/trixie repos (2.4.2). Kubernetes >= 1.36 requires containerd >= 2.0,
+#                        and Debian ships 1.6 (bookworm) / 1.7 (trixie), so the distro package is NOT usable.
+# ---------------------------------------------------------------------------
+k8s_minor: "1.37"
+k8s_version: "1.37.2"
+k8s_pkg_version: "1.37.2-1.1"
+containerd_version: "2.4.*"
+
+calico_version: "v3.33.1"
+calico_manifests:
+  - name: operator-crds.yaml
+    sha256: "bf24f4d32cbbfe2f8c418e88bcbe5699917c5aaa2e91161747a186e0731a74ba"
+  - name: tigera-operator.yaml          # deploys quay.io/tigera/operator:v1.44.1
+    sha256: "45b60c303e2f00c94bf742fe198a83c435157cd7be3e064cae153afae6d54694"
+calico_manifest_base: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests"
+calico_encapsulation: VXLANCrossSubnet
+calico_enable_observability: false    # Goldmane + Whisker flow UI (extra pods; off for small labs)
+
+# ---------------------------------------------------------------------------
+# Cluster networking. 10.244.0.0/16 instead of Calico's 192.168.0.0/16 default,
+# which overlaps most home/office LANs (and node IPs like 192.168.1.x).
+# ---------------------------------------------------------------------------
+k8s_pod_cidr: "10.244.0.0/16"
+k8s_service_cidr: "10.96.0.0/12"
+k8s_advertise_address: "{{ ansible_facts['default_ipv4']['address'] }}"
+
+# Single node: remove the control-plane NoSchedule taint so normal pods can run.
+# Set per inventory (see inventory/*.yml).
+k8s_single_node: true
+
+# User who gets ~/.kube/config on the control plane. Not "ubuntu": on Debian this is
+# your login (desktop) or "debian" (cloud images).
+k8s_kube_user: "{{ ansible_user | default(lookup('ansible.builtin.env', 'USER')) }}"
+
+k8s_manifest_dir: /etc/kubernetes/lab-manifests
+k8s_admin_kubeconfig: /etc/kubernetes/admin.conf
+k8s_join_token_ttl: "30m"

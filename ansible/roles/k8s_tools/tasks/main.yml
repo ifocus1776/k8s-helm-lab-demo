@@ -1,0 +1,84 @@
+---
+# ----- kubectl -------------------------------------------------------------
+- name: Inspect existing kubectl
+  ansible.builtin.stat:
+    path: "{{ k8s_tools_bin_dir }}/kubectl"
+  register: k8s_tools_kubectl_stat
+
+# The k3s installer may have created kubectl as a symlink to the k3s binary.
+# Remove the link first so get_url never writes through it and clobbers k3s.
+- name: Remove kubectl symlink left by k3s
+  ansible.builtin.file:
+    path: "{{ k8s_tools_bin_dir }}/kubectl"
+    state: absent
+  become: true
+  when: k8s_tools_kubectl_stat.stat.islnk | default(false)
+
+- name: Install kubectl (sha256 verified) {{ kubectl_version }}
+  ansible.builtin.get_url:
+    url: "{{ k8s_tools_kubectl_url }}"
+    checksum: "sha256:{{ k8s_tools_kubectl_url }}.sha256"
+    dest: "{{ k8s_tools_bin_dir }}/kubectl"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+# ----- helm ----------------------------------------------------------------
+- name: Read installed helm version
+  ansible.builtin.command: "{{ k8s_tools_bin_dir }}/helm version --short"
+  register: k8s_tools_helm_current
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install helm {{ helm_version }}
+  when: not (k8s_tools_helm_current.stdout | default('')).startswith(helm_version ~ '+')
+  block:
+    - name: Create download directory
+      ansible.builtin.file:
+        path: "{{ k8s_tools_tmp_dir }}"
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: Download helm tarball (sha256 verified)
+      ansible.builtin.get_url:
+        url: "{{ k8s_tools_helm_url }}"
+        checksum: "sha256:{{ k8s_tools_helm_url }}.sha256sum"
+        dest: "{{ k8s_tools_tmp_dir }}/{{ k8s_tools_helm_tarball }}"
+        mode: "0644"
+      become: true
+
+    - name: Extract helm
+      ansible.builtin.unarchive:
+        src: "{{ k8s_tools_tmp_dir }}/{{ k8s_tools_helm_tarball }}"
+        dest: "{{ k8s_tools_tmp_dir }}"
+        remote_src: true
+      become: true
+      when: not ansible_check_mode
+
+    - name: Install helm binary
+      ansible.builtin.copy:
+        src: "{{ k8s_tools_tmp_dir }}/linux-{{ lab_arch }}/helm"
+        dest: "{{ k8s_tools_bin_dir }}/helm"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+      when: not ansible_check_mode
+
+- name: Show tool versions
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - "{{ k8s_tools_bin_dir }}/kubectl version --client"
+    - "{{ k8s_tools_bin_dir }}/helm version --short"
+  register: k8s_tools_versions
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Tool versions
+  ansible.builtin.debug:
+    msg: "{{ k8s_tools_versions.results | map(attribute='stdout') | list }}"

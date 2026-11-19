@@ -1,0 +1,60 @@
+---
+# Remove the k3s lab completely (cluster, containers, images, CNI state).
+#   ansible-playbook teardown.yml -K
+- name: Tear down the desktop Kubernetes lab
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Check for the k3s uninstall script
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: lab_uninstall_script
+
+    - name: Run k3s-uninstall.sh
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      become: true
+      when: lab_uninstall_script.stat.exists
+      changed_when: true
+
+    - name: Report when k3s was not installed
+      ansible.builtin.debug:
+        msg: "k3s-uninstall.sh not found; k3s is not installed (nothing to do)."
+      when: not lab_uninstall_script.stat.exists
+
+    - name: Remove the cached install script
+      ansible.builtin.file:
+        path: /usr/local/share/k3s-lab
+        state: absent
+      become: true
+
+    - name: Remove the lab kubeconfig
+      ansible.builtin.file:
+        path: "{{ lab_kubeconfig }}"
+        state: absent
+      when: teardown_remove_kubeconfig | bool
+
+    - name: Check whether ~/.kube/config points at the lab cluster
+      ansible.builtin.command:
+        cmd: grep -q "managed-by-k8s-helm-lab" "{{ lab_home }}/.kube/config"
+      register: lab_default_kubeconfig
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: teardown_remove_kubeconfig | bool
+
+    - name: Remove ~/.kube/config only if the lab wrote it
+      ansible.builtin.file:
+        path: "{{ lab_home }}/.kube/config"
+        state: absent
+      when:
+        - teardown_remove_kubeconfig | bool
+        - lab_default_kubeconfig.rc | default(1) == 0
+
+    - name: Remove pinned kubectl and helm binaries
+      ansible.builtin.file:
+        path: "/usr/local/bin/{{ item }}"
+        state: absent
+      loop: [kubectl, helm]
+      become: true
+      when: teardown_remove_tools | bool

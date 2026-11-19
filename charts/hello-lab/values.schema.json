@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "hello-lab values",
+  "type": "object",
+  "required": ["replicaCount", "image", "app", "service", "containerPort"],
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 0, "maximum": 20 },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "const": "latest" },
+          "description": "Pinned image tag; 'latest' is rejected on purpose."
+        },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "app": {
+      "type": "object",
+      "required": ["environment", "message"],
+      "properties": {
+        "environment": { "enum": ["lab", "dev", "staging", "prod"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "logLevel": { "enum": ["debug", "info", "warn", "error"] }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "containerPort": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "pathType": { "enum": ["Prefix", "Exact", "ImplementationSpecific"] }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    }
+  }
+}

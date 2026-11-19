@@ -1,0 +1,3 @@
+# Controller tooling, installed into ./.venv by `make bootstrap`.
+# ansible-core 2.19 supports Python 3.11 (Debian 12) and 3.13 (Debian 13).
+ansible-core==2.19.15

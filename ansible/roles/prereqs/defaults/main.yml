@@ -1,0 +1,9 @@
+---
+prereqs_packages:
+  - ca-certificates
+  - curl
+  - tar
+  - gzip
+  - jq
+  - iptables
+prereqs_apt_update_cache: true

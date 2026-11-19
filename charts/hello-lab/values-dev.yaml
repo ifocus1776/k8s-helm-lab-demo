@@ -1,0 +1,22 @@
+---
+# Dev overrides: small, fast, cheap. Applied on top of values.yaml:
+#   helm upgrade --install hello-lab charts/hello-lab -f charts/hello-lab/values-dev.yaml
+replicaCount: 1
+
+app:
+  environment: dev
+  message: "Hello from DEV"
+  color: "#2e7d32"
+  logLevel: debug
+
+ingress:
+  enabled: true
+  host: hello-dev.localtest.me
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi

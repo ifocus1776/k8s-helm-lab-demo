@@ -1,0 +1,6 @@
+---
+k8s_tools_bin_dir: /usr/local/bin
+k8s_tools_kubectl_url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ lab_arch }}/kubectl"
+k8s_tools_helm_tarball: "helm-{{ helm_version }}-linux-{{ lab_arch }}.tar.gz"
+k8s_tools_helm_url: "https://get.helm.sh/{{ k8s_tools_helm_tarball }}"
+k8s_tools_tmp_dir: /var/tmp/k8s-helm-lab

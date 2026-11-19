@@ -1,0 +1,33 @@
+---
+# Bring up a single-node k3s lab on this desktop and (optionally) deploy hello-lab.
+#   ansible-playbook site.yml -K                 # full run
+#   ansible-playbook site.yml -K --check --diff  # dry run
+#   ansible-playbook site.yml -K --tags tools    # only kubectl + helm
+- name: Desktop Kubernetes lab (k3s + kubectl + helm)
+  hosts: localhost
+  gather_facts: true
+
+  pre_tasks:
+    - name: Check supported platform
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == 'Debian'
+          - ansible_facts['architecture'] in lab_arch_map
+          - lab_user != 'root'
+        fail_msg: >-
+          This lab targets Debian 12/13 (amd64 or arm64) and must be run as your normal
+          sudo-capable user, not root. Detected {{ ansible_facts['distribution'] }}
+          {{ ansible_facts['distribution_version'] }} / {{ ansible_facts['architecture'] }} / user={{ lab_user }}.
+        quiet: true
+      tags: [always]
+
+  roles:
+    - role: prereqs
+      tags: [prereqs]
+    - role: k8s_tools
+      tags: [tools]
+    - role: k3s
+      tags: [k3s]
+    - role: hello_lab
+      tags: [deploy]
+      when: deploy_sample_app | bool

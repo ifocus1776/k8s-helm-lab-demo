@@ -1,0 +1,37 @@
+---
+- name: Check for the lab kubeconfig
+  ansible.builtin.stat:
+    path: "{{ lab_kubeconfig }}"
+  register: hello_lab_kubeconfig_stat
+
+- name: Deploy the hello-lab chart with Helm
+  kubernetes.core.helm:
+    name: "{{ hello_lab_release }}"
+    chart_ref: "{{ hello_lab_chart_path }}"
+    release_namespace: "{{ hello_lab_namespace }}"
+    create_namespace: true
+    values_files: "{{ hello_lab_values_files | map('regex_replace', '^(?!/)', hello_lab_chart_path ~ '/') | list }}"
+    kubeconfig: "{{ lab_kubeconfig }}"
+    binary_path: /usr/local/bin/helm
+    wait: true
+    wait_timeout: "{{ hello_lab_wait_timeout }}"
+    atomic: true
+    state: present
+  # Skip in --check mode before the cluster exists (nothing to diff against yet).
+  when: hello_lab_kubeconfig_stat.stat.exists or not ansible_check_mode
+
+- name: Run the chart's smoke test (helm test)
+  ansible.builtin.command: >-
+    /usr/local/bin/helm --kubeconfig {{ lab_kubeconfig }}
+    test {{ hello_lab_release }} -n {{ hello_lab_namespace }} --timeout 2m
+  register: hello_lab_test
+  changed_when: false
+  when:
+    - hello_lab_run_helm_test | bool
+    - not ansible_check_mode
+
+- name: Next steps
+  ansible.builtin.debug:
+    msg:
+      - "kubectl -n {{ hello_lab_namespace }} get pods,svc,ingress"
+      - "kubectl -n {{ hello_lab_namespace }} port-forward svc/{{ hello_lab_release }} 8080:80  &&  curl -s localhost:8080 | jq"

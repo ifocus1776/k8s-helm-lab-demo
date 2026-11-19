@@ -1,0 +1,7 @@
+---
+k3s_bin: /usr/local/bin/k3s
+k3s_binary_name: "{{ 'k3s' if lab_arch == 'amd64' else 'k3s-' ~ lab_arch }}"
+k3s_release_url: "https://github.com/k3s-io/k3s/releases/download/{{ k3s_version | urlencode }}"
+k3s_install_script_url: "https://raw.githubusercontent.com/k3s-io/k3s/{{ k3s_version | urlencode }}/install.sh"
+k3s_share_dir: /usr/local/share/k3s-lab
+k3s_admin_kubeconfig: /etc/rancher/k3s/k3s.yaml

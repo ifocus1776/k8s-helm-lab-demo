@@ -1,0 +1,13 @@
+---
+# Single machine: control plane + workloads on the same node (e.g. your Debian desktop or one VM).
+all:
+  vars:
+    k8s_single_node: true
+  children:
+    control_plane:
+      hosts:
+        localhost:
+          ansible_connection: local
+          ansible_python_interpreter: /usr/bin/python3
+    workers:
+      hosts: {}

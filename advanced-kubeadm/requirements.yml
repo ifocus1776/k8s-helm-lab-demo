@@ -1,0 +1,8 @@
+---
+collections:
+  - name: ansible.posix
+    version: "2.2.2"
+  - name: community.general      # 14.x requires ansible-core >= 2.19
+    version: "14.0.1"
+  - name: kubernetes.core
+    version: "6.6.0"

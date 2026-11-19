@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hello-lab.fullname" . }}
+  labels:
+    {{- include "hello-lab.labels" . | nindent 4 }}
+data:
+  # podinfo reads PODINFO_* environment variables (UI message, color, log level).
+  PODINFO_UI_MESSAGE: {{ .Values.app.message | quote }}
+  PODINFO_UI_COLOR: {{ .Values.app.color | quote }}
+  PODINFO_LEVEL: {{ .Values.app.logLevel | quote }}
+  APP_ENVIRONMENT: {{ .Values.app.environment | quote }}

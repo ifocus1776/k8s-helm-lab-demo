@@ -1,0 +1,23 @@
+hello-lab {{ .Chart.Version }} (app {{ .Values.image.tag | default .Chart.AppVersion }}) is deployed.
+
+  Release:     {{ .Release.Name }}  (revision {{ .Release.Revision }})
+  Namespace:   {{ .Release.Namespace }}
+  Environment: {{ .Values.app.environment }}
+  Message:     {{ .Values.app.message }}
+  Replicas:    {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
+
+Watch the pods come up:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+Reach the app from your desktop:
+{{- if .Values.ingress.enabled }}
+  curl http://{{ .Values.ingress.host }}/
+  # if DNS for {{ .Values.ingress.host }} isn't available:
+  curl -H 'Host: {{ .Values.ingress.host }}' http://127.0.0.1/
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hello-lab.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://127.0.0.1:8080/
+{{- end }}
+
+Run the built-in smoke test:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

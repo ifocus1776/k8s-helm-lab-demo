@@ -1,0 +1,56 @@
+---
+# ---------------------------------------------------------------------------
+# Pinned versions. Bumping a version here + re-running the playbook IS the
+# upgrade procedure: reviewable in a PR, repeatable, and reversible.
+# ---------------------------------------------------------------------------
+k3s_version: "v1.36.6+k3s1"
+kubectl_version: "v1.36.6"
+helm_version: "v3.22.1"
+
+# SHA-256 of the k3s install.sh pinned to the git tag above (not the moving get.k3s.io script).
+# Recompute when bumping k3s_version:
+#   curl -sSL "https://raw.githubusercontent.com/k3s-io/k3s/<tag-urlencoded>/install.sh" | sha256sum
+k3s_install_script_sha256: "46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
+
+# ---------------------------------------------------------------------------
+# k3s settings (rendered into /etc/rancher/k3s/config.yaml)
+# ---------------------------------------------------------------------------
+# Keep Traefik so the chart's Ingress works on http://*.localtest.me (ports 80/443 on the host).
+# Set true if something else on your desktop already uses ports 80/443.
+k3s_disable_traefik: false
+k3s_extra_disable: []          # e.g. ["servicelb"]
+k3s_node_name: "lab"
+k3s_ready_timeout: "300s"
+
+# ---------------------------------------------------------------------------
+# Who gets the kubeconfig. Defaults to the user running ansible-playbook.
+# ---------------------------------------------------------------------------
+# Run ansible-playbook as your normal user with -K (sudo password); do not run it with sudo.
+lab_user: "{{ lookup('ansible.builtin.env', 'USER') }}"
+lab_home: "{{ lookup('ansible.builtin.env', 'HOME') }}"
+lab_kubeconfig: "{{ lab_home }}/.kube/k3s-lab.yaml"
+# Also install the lab kubeconfig as ~/.kube/config (an existing file is backed up first).
+lab_manage_default_kubeconfig: true
+
+# ---------------------------------------------------------------------------
+# Sample app deployment (kubernetes.core.helm)
+# ---------------------------------------------------------------------------
+# false by default so the live demo shows `helm install` by hand; `make lab-up DEPLOY=true` deploys via Ansible.
+deploy_sample_app: false
+hello_lab_release: "hello-lab"
+hello_lab_namespace: "demo"
+hello_lab_chart_path: "{{ playbook_dir }}/../charts/hello-lab"
+# Values files layered in order, e.g. ["values-dev.yaml"] or ["values-prod.yaml"].
+hello_lab_values_files: []
+
+# ---------------------------------------------------------------------------
+# Teardown
+# ---------------------------------------------------------------------------
+teardown_remove_tools: false        # also remove the pinned kubectl/helm binaries
+teardown_remove_kubeconfig: true    # remove ~/.kube/k3s-lab.yaml (and ~/.kube/config if it is the lab one)
+
+# Architecture mapping (amd64 primary; arm64 supported).
+lab_arch_map:
+  x86_64: amd64
+  aarch64: arm64
+lab_arch: "{{ lab_arch_map[ansible_facts['architecture']] }}"

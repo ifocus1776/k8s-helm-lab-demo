@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "hello-lab.fullname" . }}-test-connection"
+  labels:
+    {{- include "hello-lab.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: curl
+      # Reuse the app image (it ships curl), so the test needs no extra image.
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+      command:
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --max-time
+        - "5"
+        - "http://{{ include "hello-lab.fullname" . }}:{{ .Values.service.port }}/readyz"
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi

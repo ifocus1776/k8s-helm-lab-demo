@@ -1,0 +1,159 @@
+---
+- name: Install the k3s binary, sha256 verified against the release checksum file, version {{ k3s_version }}
+  ansible.builtin.get_url:
+    url: "{{ k3s_release_url }}/{{ k3s_binary_name }}"
+    checksum: "sha256:{{ k3s_release_url }}/sha256sum-{{ lab_arch }}.txt"
+    dest: "{{ k3s_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  notify: Restart k3s
+
+- name: Create k3s config directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Render k3s config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  notify: Restart k3s
+
+- name: Create directory for the pinned installer
+  ansible.builtin.file:
+    path: "{{ k3s_share_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  register: k3s_share_dir_result
+
+- name: Download the official k3s install script (sha256 verified), pinned to {{ k3s_version }}
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_script_url }}"
+    checksum: "sha256:{{ k3s_install_script_sha256 }}"
+    dest: "{{ k3s_share_dir }}/install.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  # In --check mode on a fresh machine the directory doesn't exist yet.
+  when: not (ansible_check_mode and k3s_share_dir_result is changed)
+
+# The installer only writes the systemd unit, env file, uninstall script and
+# helper symlinks; the binary was already placed and verified above.
+- name: Run the k3s installer (creates systemd unit + k3s-uninstall.sh)
+  ansible.builtin.command:
+    cmd: "{{ k3s_share_dir }}/install.sh"
+    creates: /etc/systemd/system/k3s.service
+  environment:
+    INSTALL_K3S_SKIP_DOWNLOAD: "true"
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  become: true
+
+- name: Apply pending k3s restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure k3s is enabled and running
+  ansible.builtin.systemd_service:
+    name: k3s
+    state: started
+    enabled: true
+  become: true
+  when: not ansible_check_mode
+
+- name: Wait for the admin kubeconfig
+  ansible.builtin.wait_for:
+    path: "{{ k3s_admin_kubeconfig }}"
+    timeout: 120
+  become: true
+  when: not ansible_check_mode
+
+# ----- kubeconfig for the desktop user --------------------------------------
+- name: Read the admin kubeconfig
+  ansible.builtin.slurp:
+    src: "{{ k3s_admin_kubeconfig }}"
+  register: k3s_admin_kubeconfig_content
+  become: true
+  when: not ansible_check_mode
+
+- name: Create ~/.kube
+  ansible.builtin.file:
+    path: "{{ lab_home }}/.kube"
+    state: directory
+    owner: "{{ lab_user }}"
+    mode: "0700"
+
+- name: Build the lab kubeconfig (context renamed to k3s-lab)
+  ansible.builtin.set_fact:
+    k3s_lab_kubeconfig_text: >-
+      {{ '# managed-by-k8s-helm-lab (removed by teardown.yml)' ~ '\n'
+         ~ (k3s_admin_kubeconfig_content.content | b64decode
+            | regex_replace('(?m)^(\s*(?:- )?(?:name|cluster|user|current-context)): default$', '\1: k3s-lab')) }}
+  when: not ansible_check_mode
+
+- name: Write ~/.kube/k3s-lab.yaml
+  ansible.builtin.copy:
+    content: "{{ k3s_lab_kubeconfig_text }}"
+    dest: "{{ lab_kubeconfig }}"
+    owner: "{{ lab_user }}"
+    mode: "0600"
+  no_log: true
+  when: not ansible_check_mode
+
+- name: Write ~/.kube/config (existing file is backed up)
+  ansible.builtin.copy:
+    content: "{{ k3s_lab_kubeconfig_text }}"
+    dest: "{{ lab_home }}/.kube/config"
+    owner: "{{ lab_user }}"
+    mode: "0600"
+    backup: true
+  no_log: true
+  when:
+    - lab_manage_default_kubeconfig | bool
+    - not ansible_check_mode
+
+# ----- readiness -------------------------------------------------------------
+- name: Wait for the node to be Ready
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl --kubeconfig {{ lab_kubeconfig }}
+    wait --for=condition=Ready node --all --timeout={{ k3s_ready_timeout }}
+  register: k3s_node_wait
+  retries: 10
+  delay: 6
+  until: k3s_node_wait.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Wait for CoreDNS
+  ansible.builtin.command: >-
+    /usr/local/bin/kubectl --kubeconfig {{ lab_kubeconfig }}
+    -n kube-system rollout status deployment/coredns --timeout={{ k3s_ready_timeout }}
+  register: k3s_dns_wait
+  retries: 10
+  delay: 6
+  until: k3s_dns_wait.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Show nodes
+  ansible.builtin.command: /usr/local/bin/kubectl --kubeconfig {{ lab_kubeconfig }} get nodes -o wide
+  register: k3s_nodes
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Cluster summary
+  ansible.builtin.debug:
+    msg: "{{ k3s_nodes.stdout_lines }}"
+  when: not ansible_check_mode

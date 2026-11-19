@@ -1,0 +1,4 @@
+.venv/
+ansible/collections/
+advanced-kubeadm/collections/
+*.retry

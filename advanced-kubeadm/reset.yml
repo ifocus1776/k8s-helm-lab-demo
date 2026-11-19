@@ -1,0 +1,81 @@
+---
+# Tear down the kubeadm cluster on every node (workers first, then the control plane).
+#   ansible-playbook reset.yml -K
+# Packages and the apt repositories stay installed; set k8s_reset_purge_packages=true to remove them.
+- name: Reset kubeadm nodes
+  hosts: workers:control_plane
+  become: true
+  gather_facts: false
+  serial: 1
+  order: inventory
+  vars:
+    k8s_reset_purge_packages: false
+    # Flushing iptables also removes Docker/ufw rules on a desktop; restart those services afterwards.
+    k8s_reset_flush_iptables: true
+
+  tasks:
+    - name: Check whether kubeadm is installed
+      ansible.builtin.stat:
+        path: /usr/bin/kubeadm
+      register: k8s_reset_kubeadm
+
+    - name: Run kubeadm reset
+      ansible.builtin.command:
+        argv: [kubeadm, reset, --force, --cri-socket=unix:///run/containerd/containerd.sock]
+        removes: /etc/kubernetes/kubelet.conf
+      when: k8s_reset_kubeadm.stat.exists
+
+    # kubeadm reset deliberately leaves CNI config, iptables/nftables rules and kubeconfigs behind.
+    - name: Remove CNI config, Calico state and lab manifests
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cni/net.d
+        - /var/lib/calico
+        - /var/run/calico
+        - "{{ k8s_manifest_dir }}"
+
+    - name: Look up the kubeconfig user
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ k8s_kube_user }}"
+      when: inventory_hostname in groups['control_plane']
+
+    - name: Remove the user kubeconfig
+      ansible.builtin.file:
+        path: "{{ getent_passwd[k8s_kube_user][4] }}/.kube/config"
+        state: absent
+      when: inventory_hostname in groups['control_plane']
+
+    - name: Flush iptables rules left by kube-proxy and Calico
+      ansible.builtin.shell: |
+        set -o pipefail
+        for t in filter nat mangle raw; do iptables -t "$t" -F; iptables -t "$t" -X; done
+        nft list tables 2>/dev/null | awk '/kube-proxy|calico/ {print $2, $3}' \
+          | while read -r fam tbl; do nft delete table "$fam" "$tbl"; done
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: k8s_reset_flush_iptables | bool
+
+    - name: Remove the Calico VXLAN interface if present
+      ansible.builtin.command: ip link delete vxlan.calico
+      register: k8s_reset_vxlan
+      changed_when: k8s_reset_vxlan.rc == 0
+      failed_when: false
+
+    - name: Unhold and purge Kubernetes and containerd packages
+      when: k8s_reset_purge_packages | bool
+      block:
+        - name: Unhold packages
+          ansible.builtin.dpkg_selections:
+            name: "{{ item }}"
+            selection: install
+          loop: [kubelet, kubeadm, kubectl, containerd.io]
+
+        - name: Purge packages
+          ansible.builtin.apt:
+            name: [kubelet, kubeadm, kubectl, containerd.io]
+            state: absent
+            purge: true

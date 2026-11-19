@@ -1,0 +1,389 @@
+---
+# kubeadm cluster on Debian 12/13: containerd 2.x + Kubernetes (pkgs.k8s.io) + Calico (Tigera operator).
+#   Single node : ansible-playbook site.yml -K
+#   Multi node  : ansible-playbook -i inventory/multi-node.yml site.yml -K
+
+# ============================================================================
+# Play 1: prepare every node
+# ============================================================================
+- name: Prepare all nodes for kubeadm
+  hosts: control_plane:workers
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    # Minimal Debian cloud images may lack Python; raw needs nothing on the target.
+    - name: Ensure python3 is present
+      ansible.builtin.raw: >-
+        test -x /usr/bin/python3 && echo present ||
+        (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 >/dev/null && echo installed)
+      register: k8s_python_bootstrap
+      changed_when: "'installed' in k8s_python_bootstrap.stdout"
+      check_mode: false
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+    - name: Check platform
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Debian'
+          - ansible_facts['distribution_major_version'] in ['12', '13']
+          - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+          - not (k8s_single_node | bool and (groups['workers'] | default([]) | length > 0))
+          - groups['control_plane'] | length == 1
+        fail_msg: >-
+          Needs Debian 12/13 on amd64/arm64, exactly one control-plane host, and no
+          workers when k8s_single_node is true.
+        quiet: true
+
+    - name: Check for cgroup v2 (required by kubelet >= 1.35)
+      ansible.builtin.stat:
+        path: /sys/fs/cgroup/cgroup.controllers
+      register: k8s_cgroup2
+
+    - name: Fail on cgroup v1 hosts
+      ansible.builtin.assert:
+        that: k8s_cgroup2.stat.exists
+        fail_msg: cgroup v2 is required (Debian 12/13 use it by default; check kernel cmdline for systemd.unified_cgroup_hierarchy=0).
+        quiet: true
+
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gpg
+          - python3-debian        # needed by deb822_repository
+          - conntrack
+          - socat
+          - ipset
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install the Kubernetes Python client on the control plane (kubernetes.core modules)
+      ansible.builtin.apt:
+        name: python3-kubernetes
+        state: present
+      when: inventory_hostname in groups['control_plane']
+
+    # ----- swap ---------------------------------------------------------------
+    - name: Turn off active swap
+      ansible.builtin.command: swapoff -a
+      when: ansible_facts['swaptotal_mb'] | int > 0
+      changed_when: true
+
+    - name: Comment out swap entries in /etc/fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#\s][^\n]*\sswap\s[^\n]*)$'
+        replace: '# \1  # disabled for kubelet'
+
+    - name: List systemd swap units (zram, swap files, generator units)
+      # systemd_service/service_facts cannot enumerate .swap units, so a read-only systemctl query is used.
+      ansible.builtin.command: systemctl list-unit-files --type=swap --no-legend --plain  # noqa: command-instead-of-module
+      register: k8s_swap_units
+      changed_when: false
+      check_mode: false
+
+    - name: Mask swap units so swap stays off after reboot
+      ansible.builtin.systemd_service:
+        name: "{{ item.split()[0] }}"
+        masked: true
+      loop: "{{ k8s_swap_units.stdout_lines | select('search', '\\.swap') | list }}"
+      when: "'masked' not in item"
+
+    # ----- kernel modules + sysctl ---------------------------------------------
+    - name: Load and persist kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Kernel networking parameters for Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/99-kubernetes.conf
+        state: present
+        reload: true
+      loop: "{{ k8s_sysctls | dict2items }}"
+      vars:
+        k8s_sysctls:
+          net.bridge.bridge-nf-call-iptables: "1"
+          net.bridge.bridge-nf-call-ip6tables: "1"
+          net.ipv4.ip_forward: "1"
+
+    # ----- containerd 2.x (Docker's Debian repo) -------------------------------
+    - name: Add the Docker apt repository (containerd.io only)
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: https://download.docker.com/linux/debian
+        suites: "{{ ansible_facts['distribution_release'] }}"
+        components: stable
+        architectures: "{{ 'amd64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
+        signed_by: https://download.docker.com/linux/debian/gpg
+        state: present
+      register: k8s_docker_repo
+
+    - name: Install containerd.io {{ containerd_version }}
+      ansible.builtin.apt:
+        name: "containerd.io={{ containerd_version }}"
+        state: present
+        update_cache: "{{ k8s_docker_repo is changed }}"
+        allow_change_held_packages: true
+
+    - name: Hold containerd.io
+      ansible.builtin.dpkg_selections:
+        name: containerd.io
+        selection: hold
+
+    - name: Render containerd defaults
+      ansible.builtin.command: containerd config default
+      register: k8s_containerd_default
+      changed_when: false
+      check_mode: false
+
+    # containerd.io ships a config with the CRI plugin disabled; replace it with
+    # the full default config and the systemd cgroup driver (matches kubelet).
+    - name: Write /etc/containerd/config.toml (CRI enabled, SystemdCgroup = true)
+      ansible.builtin.copy:
+        content: "{{ k8s_containerd_default.stdout | regex_replace('SystemdCgroup = false', 'SystemdCgroup = true') }}\n"
+        dest: /etc/containerd/config.toml
+        owner: root
+        group: root
+        mode: "0644"
+      when: not ansible_check_mode or k8s_containerd_default.stdout is defined
+      notify: Restart containerd
+
+    - name: Ensure containerd is running
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: started
+        enabled: true
+
+    # ----- kubelet / kubeadm / kubectl (pkgs.k8s.io, pinned minor) -------------
+    - name: Add the Kubernetes apt repository pinned to minor {{ k8s_minor }}
+      ansible.builtin.deb822_repository:
+        name: kubernetes
+        types: deb
+        uris: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/"
+        suites: /
+        signed_by: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/Release.key"
+        state: present
+      register: k8s_repo
+
+    - name: Install kubelet, kubeadm and kubectl {{ k8s_pkg_version }}
+      ansible.builtin.apt:
+        name:
+          - "kubelet={{ k8s_pkg_version }}"
+          - "kubeadm={{ k8s_pkg_version }}"
+          - "kubectl={{ k8s_pkg_version }}"
+        state: present
+        update_cache: "{{ k8s_repo is changed }}"
+        allow_change_held_packages: true
+
+    - name: Hold Kubernetes packages (upgrade deliberately with kubeadm upgrade)
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop: [kubelet, kubeadm, kubectl]
+
+    - name: Enable kubelet (it crash-loops until kubeadm init/join; that's expected)
+      ansible.builtin.systemd_service:
+        name: kubelet
+        enabled: true
+
+    - name: Flush handlers before kubeadm runs
+      ansible.builtin.meta: flush_handlers
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+
+# ============================================================================
+# Play 2: initialise the control plane
+# ============================================================================
+- name: Initialise the control plane
+  hosts: control_plane
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Run kubeadm init
+      ansible.builtin.command:
+        argv:
+          - kubeadm
+          - init
+          - "--kubernetes-version=v{{ k8s_version }}"
+          - "--pod-network-cidr={{ k8s_pod_cidr }}"
+          - "--service-cidr={{ k8s_service_cidr }}"
+          - "--apiserver-advertise-address={{ k8s_advertise_address }}"
+          - "--node-name={{ ansible_facts['hostname'] }}"
+          - "--cri-socket=unix:///run/containerd/containerd.sock"
+        creates: "{{ k8s_admin_kubeconfig }}"
+      register: k8s_kubeadm_init
+
+    - name: Look up the kubeconfig user
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ k8s_kube_user }}"
+
+    - name: Create ~/.kube for {{ k8s_kube_user }}
+      ansible.builtin.file:
+        path: "{{ getent_passwd[k8s_kube_user][4] }}/.kube"
+        state: directory
+        owner: "{{ k8s_kube_user }}"
+        group: "{{ getent_passwd[k8s_kube_user][2] }}"
+        mode: "0700"
+
+    - name: Install admin kubeconfig as ~/.kube/config (no `cp -i` prompts)
+      ansible.builtin.copy:
+        src: "{{ k8s_admin_kubeconfig }}"
+        dest: "{{ getent_passwd[k8s_kube_user][4] }}/.kube/config"
+        remote_src: true
+        owner: "{{ k8s_kube_user }}"
+        group: "{{ getent_passwd[k8s_kube_user][2] }}"
+        mode: "0600"
+        backup: true
+      when: not ansible_check_mode or k8s_kubeadm_init is not skipped
+
+    # ----- Calico via the Tigera operator --------------------------------------
+    - name: Create manifest directory
+      ansible.builtin.file:
+        path: "{{ k8s_manifest_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Download Calico operator manifests (sha256 pinned) {{ calico_version }}
+      ansible.builtin.get_url:
+        url: "{{ calico_manifest_base }}/{{ item.name }}"
+        dest: "{{ k8s_manifest_dir }}/calico-{{ calico_version }}-{{ item.name }}"
+        checksum: "sha256:{{ item.sha256 }}"
+        mode: "0640"
+      loop: "{{ calico_manifests }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Render Calico custom resources with pod CIDR {{ k8s_pod_cidr }}
+      ansible.builtin.template:
+        src: calico-custom-resources.yaml.j2
+        dest: "{{ k8s_manifest_dir }}/calico-custom-resources.yaml"
+        mode: "0640"
+
+    - name: Apply Calico operator CRDs and operator (server-side apply; CRDs are too big for client-side)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ k8s_admin_kubeconfig }}"
+        src: "{{ k8s_manifest_dir }}/calico-{{ calico_version }}-{{ item.name }}"
+        state: present
+        apply: true
+        server_side_apply:
+          field_manager: ansible-k8s-lab
+          force_conflicts: true
+      loop: "{{ calico_manifests }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: not ansible_check_mode or k8s_kubeadm_init is not skipped
+
+    - name: Wait for the Tigera operator
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k8s_admin_kubeconfig }}"
+        kind: Deployment
+        name: tigera-operator
+        namespace: tigera-operator
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 300
+      when: not ansible_check_mode
+
+    - name: Apply Calico Installation / APIServer resources
+      kubernetes.core.k8s:
+        kubeconfig: "{{ k8s_admin_kubeconfig }}"
+        src: "{{ k8s_manifest_dir }}/calico-custom-resources.yaml"
+        state: present
+        apply: true
+      when: not ansible_check_mode
+
+    # ----- single-node mode -----------------------------------------------------
+    - name: Single node - remove the control-plane NoSchedule taint
+      kubernetes.core.k8s_taint:
+        kubeconfig: "{{ k8s_admin_kubeconfig }}"
+        name: "{{ ansible_facts['hostname'] }}"
+        state: absent
+        taints:
+          - key: node-role.kubernetes.io/control-plane
+            effect: NoSchedule
+      when:
+        - k8s_single_node | bool
+        - not ansible_check_mode
+
+    - name: Wait for the control-plane node to be Ready (needs Calico up)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k8s_admin_kubeconfig }}"
+        kind: Node
+        name: "{{ ansible_facts['hostname'] }}"
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: 600
+      when: not ansible_check_mode
+
+# ============================================================================
+# Play 3: join workers (skipped automatically in single-node mode)
+# ============================================================================
+- name: Join worker nodes
+  hosts: workers
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check whether this worker already joined
+      ansible.builtin.stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: k8s_worker_kubelet_conf
+
+    - name: Create a short-lived join token on the control plane
+      ansible.builtin.command:
+        argv: [kubeadm, token, create, --print-join-command, "--ttl={{ k8s_join_token_ttl }}"]
+      register: k8s_join_command
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      run_once: true
+      changed_when: true    # it really does create a bootstrap token
+      no_log: true          # the output contains the token
+      when: >-
+        groups['workers']
+        | map('extract', hostvars, ['k8s_worker_kubelet_conf', 'stat', 'exists'])
+        | reject | list | length > 0
+
+    - name: Join the cluster
+      ansible.builtin.command:
+        cmd: "{{ k8s_join_command.stdout }} --cri-socket=unix:///run/containerd/containerd.sock"
+        creates: /etc/kubernetes/kubelet.conf
+      no_log: true
+      when: not k8s_worker_kubelet_conf.stat.exists
+
+    - name: Wait for workers to be Ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k8s_admin_kubeconfig }}"
+        kind: Node
+        name: "{{ inventory_hostname_short }}"
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: 600
+      delegate_to: "{{ groups['control_plane'][0] }}"
+      when: not ansible_check_mode

@@ -1,0 +1,3 @@
+# Optional lint tooling for `make lint`.
+ansible-lint>=25.0
+yamllint>=1.35

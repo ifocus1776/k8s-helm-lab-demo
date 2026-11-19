@@ -1,0 +1,5 @@
+---
+collections:
+  # 6.x requires ansible-core >= 2.16 (see README for Debian 12 notes).
+  - name: kubernetes.core
+    version: "6.6.0"

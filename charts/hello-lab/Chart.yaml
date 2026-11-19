@@ -1,0 +1,19 @@
+---
+apiVersion: v2
+name: hello-lab
+description: A small, security-hardened demo web app used to teach Kubernetes and Helm basics.
+type: application
+# Chart version: bump on every chart change (SemVer). This is what `helm history` tracks.
+version: 0.1.0
+# App version: the version of the application image being deployed.
+appVersion: "6.17.0"
+kubeVersion: ">=1.29.0-0"
+keywords:
+  - training
+  - demo
+  - podinfo
+home: https://github.com/stefanprodan/podinfo
+sources:
+  - https://github.com/stefanprodan/podinfo
+maintainers:
+  - name: Platform Training

@@ -1,0 +1,10 @@
+# Managed by the k8s-helm-lab Ansible playbook. Local edits will be overwritten.
+node-name: {{ k3s_node_name }}
+write-kubeconfig-mode: "0600"
+{% set disabled = (['traefik'] if k3s_disable_traefik | bool else []) + k3s_extra_disable %}
+{% if disabled | length > 0 %}
+disable:
+{% for item in disabled %}
+  - {{ item }}
+{% endfor %}
+{% endif %}

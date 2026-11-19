@@ -1,0 +1,32 @@
+---
+# Prod overrides: same chart, same templates, different values.
+# Promotion = deploying the SAME chart version with a different values file.
+replicaCount: 3
+
+app:
+  environment: prod
+  message: "Hello from PROD"
+  color: "#b71c1c"
+  logLevel: warn
+
+ingress:
+  enabled: true
+  host: hello-prod.localtest.me
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2

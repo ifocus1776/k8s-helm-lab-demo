@@ -1,0 +1,21 @@
+---
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ prereqs_packages }}"
+    state: present
+    update_cache: "{{ prereqs_apt_update_cache }}"
+    cache_valid_time: 3600
+  become: true
+
+- name: Check for active swap
+  ansible.builtin.command: swapon --noheadings --show=NAME
+  register: prereqs_swap
+  changed_when: false
+  check_mode: false
+
+- name: Note about swap
+  ansible.builtin.debug:
+    msg: >-
+      Swap is enabled ({{ prereqs_swap.stdout_lines | join(', ') }}). k3s tolerates swap,
+      so this is fine for a desktop lab; production nodes usually run without it.
+  when: prereqs_swap.stdout | length > 0
