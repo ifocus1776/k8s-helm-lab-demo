@@ -160,11 +160,11 @@ jobs:
         run: |
           # Wait for ingress to be ready
           kubectl -n demo wait --for=condition=ready pod -l app.kubernetes.io/name=hello-lab --timeout=60s
-          
+
           # Get the service cluster IP and test it
           SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
           echo "Service IP: $SERVICE_IP"
-          
+
           # Test the service endpoint
           kubectl run curl-test --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
             curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from Helm"
