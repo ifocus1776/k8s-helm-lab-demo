@@ -51,6 +51,18 @@ make lab-down         # remove everything
 
 Deploy the app from Ansible instead of by hand: `make lab-up DEPLOY=true` (uses `kubernetes.core.helm`, then runs `helm test`).
 
+## QA console
+
+`make qa` starts a loopback console at <http://127.0.0.1:8787> for reviewing and deploying this chart.
+
+- **Dev, QA, and prod** are the same Helm release name in different namespaces. QA starts from `values-dev.yaml` and sets its own ingress host, so a QA experiment does not replace the dev or prod release.
+- **Review manifests** runs `helm template` and shows the YAML before anything is deployed.
+- **Deploy committed** applies the values file in git. **Deploy overlay** adds only the replicas, message, color, and log level you typed. Those fields are checked against the chart schema limits and written to a temporary values file. The image tag stays pinned.
+- **Run QA test** runs the chart's `helm test` hook. **Check the app** reads the Service response and shows the message the pods are serving.
+- **Release history** rolls the selected namespace back to an earlier Helm revision.
+
+The console shells out to `helm` and `kubectl` on the machine where it runs. It does not accept a kubeconfig, a chart path, or a raw manifest from the browser.
+
 ## CI/CD Pipeline
 
 The repository includes a comprehensive GitHub Actions pipeline (`.github/workflows/ci.yml`) that proves the demo works end-to-end on GitHub-hosted runners:

@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QA Lab</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #10151b;
+      --panel: #1a222c;
+      --panel-2: #222c38;
+      --line: #31404e;
+      --text: #e8eef4;
+      --muted: #93a3b3;
+      --accent: #3ddc97;
+      --accent-ink: #06281a;
+      --warn: #e3b341;
+      --danger: #f07178;
+      --info: #79b8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.45 "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0 8px; }
+    h1 { margin: 0 0 6px; font-size: 28px; letter-spacing: -0.03em; }
+    h2 { margin: 0 0 10px; font-size: 16px; }
+    p { margin: 0; color: var(--muted); }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      color: var(--muted);
+      background: var(--panel);
+      font-size: 13px;
+    }
+    .chip.ok { color: var(--accent); border-color: #1f6b4a; }
+    .chip.bad { color: var(--danger); border-color: #6d3036; }
+    .banner {
+      margin: 16px 0;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #3a2e14;
+      color: #f3ddb0;
+    }
+    .hidden { display: none; }
+    .targets { display: flex; gap: 8px; margin: 18px 0; }
+    .targets button, .actions button, .history button {
+      font: inherit;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .targets button[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-color: var(--accent);
+      font-weight: 650;
+    }
+    .layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    label { display: block; margin: 12px 0 4px; color: var(--muted); font-size: 13px; }
+    input, select {
+      width: 100%;
+      font: inherit;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    .actions .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 650; }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12.5px/1.45 ui-monospace, "Cascadia Code", monospace;
+      color: #d5e2ef;
+    }
+    .scroll { max-height: 280px; overflow: auto; }
+    .tall { max-height: 460px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .result { margin-top: 10px; color: var(--muted); }
+    .result.ok { color: var(--accent); }
+    .result.bad { color: var(--danger); }
+    .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>QA Lab</h1>
+    <p>Review the hello-lab Helm chart, deploy that same chart to dev, QA, or prod, and run its smoke test. QA uses the dev values in its own namespace, so an experiment stays off the dev and prod releases. Committed values files stay in git. Fields you fill in are an overlay for this deploy only.</p>
+    <div class="chips" id="chips"></div>
+    <div class="banner hidden" id="banner"></div>
+    <div class="targets" role="group" aria-label="Environment">
+      <button type="button" data-target="dev">Dev</button>
+      <button type="button" data-target="qa" aria-pressed="true">QA</button>
+      <button type="button" data-target="prod">Prod</button>
+    </div>
+  </header>
+  <main>
+    <div class="layout">
+      <section>
+        <h2>Experiment</h2>
+        <p class="meta" id="target-meta"></p>
+        <label for="replicas">Replicas <span>(blank keeps the committed count)</span></label>
+        <input id="replicas" type="number" min="1" max="6" step="1" placeholder="1-6">
+        <label for="message">Message</label>
+        <input id="message" type="text" maxlength="200" placeholder="Hello from QA">
+        <label for="color">Color</label>
+        <input id="color" type="text" maxlength="7" placeholder="#6a1b9a" spellcheck="false">
+        <label for="log-level">Log level</label>
+        <select id="log-level">
+          <option value="">Use committed log level</option>
+          <option>debug</option>
+          <option>info</option>
+          <option>warn</option>
+          <option>error</option>
+        </select>
+        <div class="actions">
+          <button type="button" id="review">Review manifests</button>
+          <button type="button" class="primary" id="deploy">Deploy overlay</button>
+          <button type="button" id="deploy-committed">Deploy committed</button>
+        </div>
+        <div class="result" id="action-result" role="status"></div>
+      </section>
+      <section>
+        <h2>Cluster</h2>
+        <p class="meta" id="release-meta">No release loaded yet.</p>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>Pod</th><th>Phase</th><th>Ready</th><th>Restarts</th></tr></thead>
+            <tbody id="pods"><tr><td colspan="4">Waiting for status.</td></tr></tbody>
+          </table>
+        </div>
+        <div class="actions">
+          <button type="button" id="test">Run QA test</button>
+          <button type="button" id="probe">Check the app</button>
+          <button type="button" id="refresh">Refresh</button>
+        </div>
+        <div class="result" id="check-result" role="status"></div>
+      </section>
+    </div>
+    <section>
+      <h2>Committed values</h2>
+      <p class="meta" id="values-name"></p>
+      <div class="scroll"><pre id="values"></pre></div>
+    </section>
+    <section>
+      <h2>Rendered manifests</h2>
+      <p class="meta">This is the YAML Helm would apply. Review it before you deploy.</p>
+      <div class="scroll tall"><pre id="manifests">Choose Review manifests to render the chart.</pre></div>
+    </section>
+    <section>
+      <h2>Release history</h2>
+      <div id="history" class="meta">No history yet.</div>
+    </section>
+  </main>
+  <script>
+    const state = { target: "qa", iac: null, busy: false };
+
+    function $(id) { return document.getElementById(id); }
+
+    function setResult(id, text, kind) {
+      const node = $(id);
+      node.textContent = text || "";
+      node.className = "result" + (kind ? " " + kind : "");
+    }
+
+    async function api(path, body) {
+      const options = { headers: { "X-Requested-With": "QALab" } };
+      if (body !== undefined) {
+        options.method = "POST";
+        options.headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(body);
+      }
+      const response = await fetch(path, options);
+      const payload = await response.json();
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.error || ("Request failed (" + response.status + ")"));
+      }
+      return payload;
+    }
+
+    function experimentFromForm() {
+      const experiment = {};
+      const replicas = $("replicas").value.trim();
+      if (replicas !== "") experiment.replicaCount = Number(replicas);
+      const message = $("message").value.trim();
+      if (message !== "") experiment.message = message;
+      const color = $("color").value.trim();
+      if (color !== "") experiment.color = color;
+      const logLevel = $("log-level").value;
+      if (logLevel) experiment.logLevel = logLevel;
+      return Object.keys(experiment).length ? experiment : null;
+    }
+
+    function currentTarget() {
+      return state.iac.targets.find((item) => item.id === state.target);
+    }
+
+    function renderTarget() {
+      const target = currentTarget();
+      document.querySelectorAll(".targets button").forEach((button) => {
+        button.setAttribute("aria-pressed", button.dataset.target === state.target ? "true" : "false");
+      });
+      $("target-meta").textContent = target.label + " deploys release hello-lab into namespace " + target.namespace + " at http://" + target.host + "/ using " + target.valuesFile + ".";
+      $("values-name").textContent = "charts/hello-lab/" + target.valuesFile;
+      $("values").textContent = state.iac.values[target.valuesFile];
+    }
+
+    function renderPods(pods) {
+      const body = $("pods");
+      body.replaceChildren();
+      if (!pods.length) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 4;
+        cell.textContent = "No hello-lab pods in this namespace.";
+        row.append(cell);
+        body.append(row);
+        return;
+      }
+      pods.forEach((pod) => {
+        const row = document.createElement("tr");
+        [pod.name, pod.phase, pod.ready, String(pod.restarts)].forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.append(cell);
+        });
+        body.append(row);
+      });
+    }
+
+    function renderHistory(revisions) {
+      const root = $("history");
+      root.replaceChildren();
+      if (!revisions.length) {
+        root.textContent = "No release in this namespace yet.";
+        return;
+      }
+      revisions.slice().reverse().forEach((revision) => {
+        const row = document.createElement("div");
+        row.className = "actions";
+        const text = document.createElement("span");
+        text.textContent = "Revision " + revision.revision + " · " + revision.status + " · " + revision.chart + " · " + revision.description;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Roll back to " + revision.revision;
+        button.addEventListener("click", () => rollBack(revision.revision));
+        row.append(text, button);
+        root.append(row);
+      });
+    }
+
+    async function refreshHealth() {
+      const health = await api("/api/health");
+      const chips = $("chips");
+      chips.replaceChildren();
+      [
+        ["Helm", health.helm],
+        ["kubectl", health.kubectl],
+        ["Cluster", health.cluster],
+      ].forEach(([label, ok]) => {
+        const chip = document.createElement("span");
+        chip.className = "chip " + (ok ? "ok" : "bad");
+        chip.textContent = label + (ok ? " ready" : " missing");
+        chips.append(chip);
+      });
+      const banner = $("banner");
+      if (!health.cluster) {
+        banner.classList.remove("hidden");
+        banner.textContent = "The cluster is not reachable, so deploy, test, and rollback will fail. You can still review the rendered manifests.";
+      } else {
+        banner.classList.add("hidden");
+      }
+    }
+
+    async function refreshStatus() {
+      const status = await api("/api/status?target=" + encodeURIComponent(state.target));
+      if (!status.cluster) {
+        $("release-meta").textContent = status.error || "Cluster is not reachable.";
+        renderPods([]);
+        return;
+      }
+      const names = (status.nodes || []).map((node) => node.name + (node.ready ? " Ready" : " NotReady")).join(", ");
+      const release = status.release
+        ? "Release revision " + status.release.revision + " is " + status.release.status + " in " + status.namespace + "."
+        : "No Helm release in " + status.namespace + " yet.";
+      $("release-meta").textContent = (names ? "Node " + names + ". " : "") + release;
+      renderPods(status.pods || []);
+    }
+
+    async function refreshHistory() {
+      try {
+        const payload = await api("/api/history?target=" + encodeURIComponent(state.target));
+        renderHistory(payload.revisions || []);
+      } catch (error) {
+        $("history").textContent = error.message;
+      }
+    }
+
+    function setBusy(busy) {
+      state.busy = busy;
+      document.querySelectorAll("button").forEach((button) => {
+        button.disabled = busy;
+      });
+    }
+
+    async function review() {
+      setBusy(true);
+      setResult("action-result", "Rendering manifests…");
+      try {
+        const payload = await api("/api/preview", { target: state.target, experiment: experimentFromForm() });
+        $("manifests").textContent = payload.yaml;
+        setResult("action-result", "Manifests rendered. Nothing was deployed.", "ok");
+      } catch (error) {
+        setResult("action-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function deploy(committed) {
+      setBusy(true);
+      setResult("action-result", committed ? "Deploying committed values…" : "Deploying overlay…");
+      try {
+        const payload = await api("/api/deploy", {
+          target: state.target,
+          experiment: committed ? null : experimentFromForm(),
+        });
+        setResult("action-result", "Deploy finished in namespace " + payload.namespace + ".", "ok");
+        await refreshStatus();
+        await refreshHistory();
+        await checkApp(false);
+      } catch (error) {
+        setResult("action-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function runTest() {
+      setBusy(true);
+      setResult("check-result", "Running helm test…");
+      try {
+        await api("/api/test", { target: state.target });
+        setResult("check-result", "QA test passed.", "ok");
+        await refreshStatus();
+      } catch (error) {
+        setResult("check-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function checkApp(toggleBusy) {
+      if (toggleBusy) setBusy(true);
+      try {
+        const payload = await api("/api/probe?target=" + encodeURIComponent(state.target));
+        const body = payload.body || {};
+        const message = body.message ? " App message: " + body.message + "." : "";
+        const host = body.hostname ? " Pod: " + body.hostname + "." : "";
+        setResult("check-result", "HTTP " + payload.status + " via " + payload.via + "." + message + host, payload.ok ? "ok" : "bad");
+      } catch (error) {
+        setResult("check-result", error.message, "bad");
+      } finally {
+        if (toggleBusy) setBusy(false);
+      }
+    }
+
+    async function rollBack(revision) {
+      setBusy(true);
+      setResult("action-result", "Rolling back to revision " + revision + "…");
+      try {
+        await api("/api/rollback", { target: state.target, revision: revision });
+        setResult("action-result", "Rolled back to revision " + revision + ".", "ok");
+        await refreshStatus();
+        await refreshHistory();
+      } catch (error) {
+        setResult("action-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function boot() {
+      state.iac = await api("/api/iac");
+      renderTarget();
+      await refreshHealth();
+      await refreshStatus();
+      await refreshHistory();
+    }
+
+    document.querySelectorAll(".targets button").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (state.busy) return;
+        state.target = button.dataset.target;
+        renderTarget();
+        $("manifests").textContent = "Choose Review manifests to render the chart.";
+        setResult("action-result", "");
+        setResult("check-result", "");
+        await refreshStatus();
+        await refreshHistory();
+      });
+    });
+    $("review").addEventListener("click", review);
+    $("deploy").addEventListener("click", () => deploy(false));
+    $("deploy-committed").addEventListener("click", () => deploy(true));
+    $("test").addEventListener("click", runTest);
+    $("probe").addEventListener("click", () => checkApp(true));
+    $("refresh").addEventListener("click", async () => {
+      setBusy(true);
+      try {
+        await refreshHealth();
+        await refreshStatus();
+        await refreshHistory();
+      } finally {
+        setBusy(false);
+      }
+    });
+    boot().catch((error) => {
+      setResult("action-result", error.message, "bad");
+    });
+  </script>
+</body>
+</html>

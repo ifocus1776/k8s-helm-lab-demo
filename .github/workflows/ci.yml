@@ -102,6 +102,9 @@ jobs:
           helm template hello-lab charts/hello-lab -f charts/hello-lab/values-prod.yaml | \
             kubeconform -strict -summary -ignore-missing-schemas
 
+      - name: QA console unit tests
+        run: python3 qa-lab/test_server.py
+
   # =========================================================================
   # INTEGRATION: Full end-to-end test on ubuntu-latest with k3s
   # =========================================================================
