@@ -22,7 +22,7 @@ SET_ARGS    := $(if $(strip $(REPLICAS)),--set replicaCount=$(strip $(REPLICAS))
                $(if $(strip $(MESSAGE)),--set-string app.message="$(strip $(MESSAGE))",)
 
 .PHONY: help bootstrap collections lab-up lab-check deploy upgrade rollback history status test \
-        dev prod lab-down lint template clean
+        dev prod lab-down lint template qa clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -67,6 +67,9 @@ dev: ## Deploy the dev environment (namespace dev, values-dev.yaml)
 
 prod: ## Deploy the prod environment (namespace prod, values-prod.yaml)
 	$(MAKE) deploy RELEASE=hello-lab NS=prod ENV=prod
+
+qa: ## Run the QA console at http://127.0.0.1:8787
+	python3 qa-lab/server.py
 
 lab-down: ## Remove k3s completely (k3s-uninstall.sh via Ansible)
 	cd ansible && $(ANSIBLE_PLAYBOOK) teardown.yml $(BECOME)

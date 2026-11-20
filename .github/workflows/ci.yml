@@ -102,6 +102,9 @@ jobs:
           helm template hello-lab charts/hello-lab -f charts/hello-lab/values-prod.yaml | \
             kubeconform -strict -summary -ignore-missing-schemas
 
+      - name: QA console unit tests
+        run: python3 qa-lab/test_server.py
+
   # =========================================================================
   # INTEGRATION: Full end-to-end test on ubuntu-latest with k3s
   # =========================================================================
@@ -165,9 +168,23 @@ jobs:
           SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
           echo "Service IP: $SERVICE_IP"
 
-          # Test the service endpoint
-          kubectl run curl-test-1 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
-            curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from Helm"
+          # kubectl 1.36 `run -i --rm | grep -q` drops fast curl output and can
+          # exit 141 under pipefail even when the body matches. Read the logs.
+          kubectl -n demo delete pod curl-test-1 --ignore-not-found --wait=true
+          kubectl -n demo run curl-test-1 --image=curlimages/curl:8.11.1 --restart=Never -- \
+            curl -fsS "http://${SERVICE_IP}/"
+          phase=""
+          for _ in $(seq 1 45); do
+            phase=$(kubectl -n demo get pod curl-test-1 -o jsonpath='{.status.phase}')
+            if [ "$phase" = Succeeded ] || [ "$phase" = Failed ]; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n demo logs curl-test-1 | tee /tmp/curl-test-1.txt
+          test "$phase" = Succeeded
+          grep -q "Hello from Helm" /tmp/curl-test-1.txt
+          kubectl -n demo delete pod curl-test-1 --wait=true
 
       - name: Show Helm history (initial)
         run: |
@@ -182,8 +199,21 @@ jobs:
       - name: Verify dev deployment
         run: |
           SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
-          kubectl run curl-test-2 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
-            curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from DEV"
+          kubectl -n demo delete pod curl-test-2 --ignore-not-found --wait=true
+          kubectl -n demo run curl-test-2 --image=curlimages/curl:8.11.1 --restart=Never -- \
+            curl -fsS "http://${SERVICE_IP}/"
+          phase=""
+          for _ in $(seq 1 45); do
+            phase=$(kubectl -n demo get pod curl-test-2 -o jsonpath='{.status.phase}')
+            if [ "$phase" = Succeeded ] || [ "$phase" = Failed ]; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n demo logs curl-test-2 | tee /tmp/curl-test-2.txt
+          test "$phase" = Succeeded
+          grep -q "Hello from DEV" /tmp/curl-test-2.txt
+          kubectl -n demo delete pod curl-test-2 --wait=true
 
       - name: Show Helm history (after upgrade)
         run: |
@@ -220,8 +250,21 @@ jobs:
       - name: Verify rollback worked (should be back to dev)
         run: |
           SERVICE_IP=$(kubectl -n demo get svc hello-lab -o jsonpath='{.spec.clusterIP}')
-          kubectl run curl-test-3 --image=curlimages/curl:8.11.1 --rm -i --restart=Never -- \
-            curl -f -s "http://${SERVICE_IP}/" | grep -q "Hello from DEV"
+          kubectl -n demo delete pod curl-test-3 --ignore-not-found --wait=true
+          kubectl -n demo run curl-test-3 --image=curlimages/curl:8.11.1 --restart=Never -- \
+            curl -fsS "http://${SERVICE_IP}/"
+          phase=""
+          for _ in $(seq 1 45); do
+            phase=$(kubectl -n demo get pod curl-test-3 -o jsonpath='{.status.phase}')
+            if [ "$phase" = Succeeded ] || [ "$phase" = Failed ]; then
+              break
+            fi
+            sleep 2
+          done
+          kubectl -n demo logs curl-test-3 | tee /tmp/curl-test-3.txt
+          test "$phase" = Succeeded
+          grep -q "Hello from DEV" /tmp/curl-test-3.txt
+          kubectl -n demo delete pod curl-test-3 --wait=true
 
       - name: Show final cluster state
         run: |

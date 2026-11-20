@@ -2,3 +2,5 @@
 ansible/collections/
 advanced-kubeadm/collections/
 *.retry
+__pycache__/
+*.pyc
