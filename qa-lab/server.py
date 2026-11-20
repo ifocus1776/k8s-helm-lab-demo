@@ -296,6 +296,7 @@ def experiment_from_canary_values(values: dict) -> dict | None:
 
 def run(args: list[str], timeout: int) -> tuple[int, str]:
     try:
+        # Close stdin so kubectl cannot block on a basic-auth prompt.
         completed = subprocess.run(
             args,
             cwd=REPO_ROOT,
@@ -303,6 +304,7 @@ def run(args: list[str], timeout: int) -> tuple[int, str]:
             text=True,
             timeout=timeout,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as exc:
         raise LabError(f"timed out after {timeout}s", 504) from exc
@@ -959,12 +961,19 @@ def delete_ephemeral(namespace: object) -> dict:
 
 
 def health() -> dict:
+    """Tool presence for the console. An unreachable cluster is still a successful response."""
     helm = tool("helm")
     kubectl = tool("kubectl")
     cluster = False
     if kubectl:
-        code, _output = run([kubectl, "get", "--raw=/readyz"], 8)
-        cluster = code == 0
+        try:
+            code, _output = run(
+                [kubectl, "--request-timeout=2s", "get", "--raw=/readyz"],
+                4,
+            )
+            cluster = code == 0
+        except LabError:
+            cluster = False
     return {"ok": True, "helm": bool(helm), "kubectl": bool(kubectl), "cluster": cluster}
 
 

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -244,6 +245,25 @@ class HttpTests(unittest.TestCase):
             header=False,
         )
         self.assertEqual(status, 403)
+
+    def test_health_stays_up_when_kubectl_hangs(self) -> None:
+        directory = tempfile.mkdtemp()
+        binary = Path(directory) / "kubectl"
+        binary.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+        binary.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = directory + os.pathsep + old_path
+        started = time.monotonic()
+        try:
+            status, health = self.request("/api/health")
+        finally:
+            os.environ["PATH"] = old_path
+            shutil.rmtree(directory)
+        self.assertEqual(status, 200, health)
+        self.assertTrue(health["ok"])
+        self.assertTrue(health["kubectl"])
+        self.assertFalse(health["cluster"])
+        self.assertLess(time.monotonic() - started, 6)
 
     @unittest.skipUnless(shutil.which("helm"), "helm is not installed")
     def test_preview_renders_qa_host(self) -> None:
