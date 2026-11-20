@@ -60,8 +60,10 @@ Deploy the app from Ansible instead of by hand: `make lab-up DEPLOY=true` (uses 
 - **Deploy committed** applies the values file in git. **Deploy overlay** adds only the replicas, message, color, and log level you typed. Those fields are checked against the chart schema limits and written to a temporary values file. The image tag stays pinned.
 - **Run QA test** runs the chart's `helm test` hook. **Check the app** reads the Service response and shows the message the pods are serving.
 - **Release history** rolls the selected namespace back to an earlier Helm revision.
+- **Canary** installs a second release, `hello-lab-canary`, in the same namespace as stable `hello-lab`. Weight is an integer from 0 to 100. At 0 the canary has 0 replicas; above 0 its replica count is `max(1, round(stableReplicas × weight / 100))` with half-up rounding. This is a replica canary: the chart has no service-mesh traffic split, and the stable release is left unchanged. Promote copies the canary's message, color, log level, and replica intent onto the stable release, then uninstalls the canary. Discard only uninstalls the canary.
+- **Ephemeral** creates a namespace named `eph-` plus 8 lowercase hex characters on this same lab k3s cluster, deploys `hello-lab` there with the QA values file (`values-dev.yaml`, staging environment, host `hello-<namespace>.localtest.me`), and deletes that namespace when you are done. Delete refuses every name that is not `eph-` and 8 hex characters. At most three ephemeral namespaces exist at once.
 
-The console shells out to `helm` and `kubectl` on the machine where it runs. It does not accept a kubeconfig, a chart path, or a raw manifest from the browser.
+The console shells out to `helm` and `kubectl` on the machine where it runs. It does not accept a kubeconfig, a chart path, a release name, a namespace, or a raw manifest from the browser.
 
 ## CI/CD Pipeline
 

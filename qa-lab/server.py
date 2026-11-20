@@ -4,6 +4,9 @@
 The console binds to loopback and only accepts three fixed targets
 (dev, qa, prod). Experiment fields are validated and passed to Helm as
 a values file, never through a shell.
+
+Canary deploys are a second fixed release in the selected namespace.
+Ephemeral environments are server-named namespaces on this same cluster.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -25,7 +29,9 @@ CHART = REPO_ROOT / "charts" / "hello-lab"
 STATIC_INDEX = Path(__file__).resolve().parent / "static" / "index.html"
 OVERRIDE_DIR = Path(os.environ.get("QA_LAB_OVERRIDE_DIR", "/tmp/qa-lab"))
 RELEASE = "hello-lab"
+CANARY_RELEASE = "hello-lab-canary"
 SERVICE = "hello-lab"
+MAX_EPHEMERAL = 3
 HOST = os.environ.get("QA_LAB_HOST", "127.0.0.1")
 PORT = int(os.environ.get("QA_LAB_PORT", "8787"))
 MAX_BODY = 16_384
@@ -60,6 +66,10 @@ LOG_LEVELS = ("debug", "info", "warn", "error")
 COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 MESSAGE_RE = re.compile(r"^[ -~]{1,200}$")
 IP_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+EPH_RE = re.compile(r"^eph-[0-9a-f]{8}$")
+NAMESPACE_RE = re.compile(r"^(?:dev|qa|prod|eph-[0-9a-f]{8})$")
+HOST_RE = re.compile(r"^hello-[a-z0-9-]{1,48}\.localtest\.me$")
+PREFIX_RE = re.compile(r"^[a-z0-9-]{1,40}$")
 MUTATION = threading.Lock()
 
 
@@ -120,13 +130,84 @@ def target_from(value: object) -> tuple[str, dict]:
     return value, TARGETS[value]
 
 
+def reject_unknown(body: dict, allowed: set[str]) -> None:
+    if set(body) - allowed:
+        raise LabError("unknown fields")
+
+
+def parse_weight(raw: object) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= 100:
+        raise LabError("weight must be an integer from 0 to 100")
+    return raw
+
+
+def canary_replica_count(stable_replicas: int, weight: int) -> int:
+    """Replica canary size. Half-up rounding; weight 0 keeps zero replicas."""
+    if isinstance(stable_replicas, bool) or not isinstance(stable_replicas, int):
+        raise LabError("stable replica count is unreadable", 502)
+    if weight <= 0:
+        return 0
+    scaled = (stable_replicas * weight + 50) // 100
+    return max(1, scaled)
+
+
+def canary_release() -> str:
+    return CANARY_RELEASE
+
+
+def canary_host(target_id: str) -> str:
+    if target_id not in TARGETS:
+        raise LabError("target must be dev, qa, or prod", 500)
+    return allow_host(f"hello-{target_id}-canary.localtest.me")
+
+
+def ephemeral_namespace_ok(name: object) -> bool:
+    return isinstance(name, str) and EPH_RE.fullmatch(name) is not None
+
+
+def require_ephemeral_namespace(name: object) -> str:
+    if not ephemeral_namespace_ok(name):
+        raise LabError("namespace must be an ephemeral lab namespace")
+    return name
+
+
+def allow_namespace(namespace: str) -> str:
+    if NAMESPACE_RE.fullmatch(namespace) is None:
+        raise LabError("namespace is not allowed", 500)
+    return namespace
+
+
+def allow_release(release: str) -> str:
+    if release not in {RELEASE, CANARY_RELEASE}:
+        raise LabError("release is not allowed", 500)
+    return release
+
+
+def allow_host(host: str) -> str:
+    if HOST_RE.fullmatch(host) is None:
+        raise LabError("ingress host is not allowed", 500)
+    return host
+
+
+def allow_chart() -> str:
+    chart = CHART.resolve()
+    if chart.name != "hello-lab" or not (chart / "Chart.yaml").is_file():
+        raise LabError("chart path is not available", 500)
+    return str(chart)
+
+
+def ensure_ephemeral_capacity(count: int) -> None:
+    if count >= MAX_EPHEMERAL:
+        raise LabError("ephemeral namespace limit reached", 409)
+
+
 def yaml_double(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def render_override(target_id: str, target: dict, experiment: dict | None) -> str | None:
-    """Values overlay. QA always gets its own ingress host."""
-    if experiment is None and target_id != "qa":
+    """Values overlay. QA and ephemeral deploys always pin an ingress host."""
+    if experiment is None and target_id not in {"qa", "ephemeral"}:
         return None
     lines: list[str] = []
     if experiment and "replicaCount" in experiment:
@@ -145,11 +226,72 @@ def render_override(target_id: str, target: dict, experiment: dict | None) -> st
         lines.append(f"  color: {yaml_double(experiment['color'])}")
     if experiment and "logLevel" in experiment:
         lines.append(f"  logLevel: {experiment['logLevel']}")
-    if target_id == "qa":
+    if target_id in {"qa", "ephemeral"}:
         lines.append("ingress:")
         lines.append("  enabled: true")
-        lines.append(f"  host: {target['host']}")
+        lines.append(f"  host: {allow_host(target['host'])}")
     return "\n".join(lines) + "\n"
+
+
+def render_canary_overlay(
+    target_id: str,
+    target: dict,
+    experiment: dict | None,
+    weight: int,
+    replicas: int,
+    replica_intent: int | None,
+) -> str:
+    """Committed values stay in the chart file. This overlay is the canary delta."""
+    environment = target["environment"]
+    if environment not in {"lab", "dev", "staging", "prod"}:
+        raise LabError("environment is not allowed", 500)
+    lines = [
+        f"replicaCount: {replicas}",
+        "autoscaling:",
+        "  enabled: false",
+    ]
+    if replicas < 2:
+        lines.extend(["podDisruptionBudget:", "  enabled: false"])
+    lines.extend(["app:", f"  environment: {environment}"])
+    if experiment and "message" in experiment:
+        lines.append(f"  message: {yaml_double(experiment['message'])}")
+    if experiment and "color" in experiment:
+        lines.append(f"  color: {yaml_double(experiment['color'])}")
+    if experiment and "logLevel" in experiment:
+        lines.append(f"  logLevel: {experiment['logLevel']}")
+    lines.extend(
+        [
+            "ingress:",
+            "  enabled: true",
+            f"  host: {canary_host(target_id)}",
+            "podAnnotations:",
+            f'  qa-lab/weight: "{weight}"',
+        ]
+    )
+    if replica_intent is not None:
+        lines.append(f'  qa-lab/replica-intent: "{replica_intent}"')
+    return "\n".join(lines) + "\n"
+
+
+def experiment_from_canary_values(values: dict) -> dict | None:
+    """Copy only message, color, log level, and replica intent. Ignore everything else."""
+    if not isinstance(values, dict):
+        raise LabError("canary values were not an object", 502)
+    raw: dict = {}
+    app = values.get("app")
+    if isinstance(app, dict):
+        for key in ("message", "color", "logLevel"):
+            if key in app:
+                raw[key] = app[key]
+    annotations = values.get("podAnnotations")
+    if isinstance(annotations, dict) and "qa-lab/replica-intent" in annotations:
+        intent = annotations["qa-lab/replica-intent"]
+        if not isinstance(intent, str) or re.fullmatch(r"[1-6]", intent) is None:
+            raise LabError("canary replica intent is not safe to promote")
+        raw["replicaCount"] = int(intent)
+    if not raw:
+        return None
+    return parse_experiment(raw)
 
 
 def run(args: list[str], timeout: int) -> tuple[int, str]:
@@ -184,19 +326,37 @@ def require_kubectl() -> str:
     return found
 
 
-def helm_values_args(target_id: str, target: dict, experiment: dict | None) -> tuple[list[str], str | None]:
-    values = CHART / target["values_file"]
-    if not values.is_file():
-        raise LabError(f"missing {target['values_file']}", 500)
+def _values_file(target: dict) -> Path:
+    name = target["values_file"]
+    if name not in {"values-dev.yaml", "values-prod.yaml"}:
+        raise LabError("values file is not allowed", 500)
+    values = (CHART / name).resolve()
+    if values.parent != CHART.resolve() or not values.is_file():
+        raise LabError(f"missing {name}", 500)
+    return values
+
+
+def helm_values_args(
+    target_id: str,
+    target: dict,
+    experiment: dict | None,
+    overlay: str | None = None,
+    prefix: str | None = None,
+) -> tuple[list[str], str | None]:
+    values = _values_file(target)
     args = ["-f", str(values)]
-    overlay = render_override(target_id, target, experiment)
+    if overlay is None:
+        overlay = render_override(target_id, target, experiment)
     if overlay is None:
         return args, None
+    safe_prefix = prefix or target_id
+    if PREFIX_RE.fullmatch(safe_prefix) is None:
+        raise LabError("overlay prefix is not allowed", 500)
     OVERRIDE_DIR.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
-        prefix=f"{target_id}-",
+        prefix=f"{safe_prefix}-",
         suffix=".yaml",
         dir=OVERRIDE_DIR,
         delete=False,
@@ -206,6 +366,21 @@ def helm_values_args(target_id: str, target: dict, experiment: dict | None) -> t
     finally:
         handle.close()
     return args + ["-f", handle.name], handle.name
+
+
+def _assert_values_args(values_args: list[str]) -> None:
+    if len(values_args) % 2 != 0:
+        raise LabError("values arguments are not allowed", 500)
+    chart_root = CHART.resolve()
+    override_root = OVERRIDE_DIR.resolve()
+    for flag, path in zip(values_args[0::2], values_args[1::2]):
+        if flag != "-f":
+            raise LabError("values arguments are not allowed", 500)
+        resolved = Path(path).resolve()
+        allowed_chart = resolved.parent == chart_root and resolved.suffix == ".yaml"
+        allowed_overlay = override_root in resolved.parents and resolved.suffix == ".yaml"
+        if not allowed_chart and not allowed_overlay:
+            raise LabError("values file is not allowed", 500)
 
 
 def chart_meta() -> dict:
@@ -263,32 +438,76 @@ def preview(target_id: str, experiment: dict | None) -> dict:
     return {"ok": True, "yaml": output, "command": " ".join(shlex.quote(part) for part in args)}
 
 
-def deploy(target_id: str, experiment: dict | None) -> dict:
-    _, target = target_from(target_id)
+def helm_upgrade_install(release: str, namespace: str, values_args: list[str]) -> dict:
     helm = require_helm()
-    values_args, overlay_path = helm_values_args(target_id, target, experiment)
+    release = allow_release(release)
+    namespace = allow_namespace(namespace)
+    _assert_values_args(values_args)
     args = [
         helm,
         "upgrade",
         "--install",
-        RELEASE,
-        str(CHART),
+        release,
+        allow_chart(),
         "-n",
-        target["namespace"],
+        namespace,
         "--create-namespace",
         *values_args,
         "--wait",
         "--timeout",
         "4m",
     ]
+    code, output = run(args, 300)
+    if code != 0:
+        raise LabError(output.strip() or "helm upgrade failed", 502)
+    return {
+        "ok": True,
+        "output": output,
+        "namespace": namespace,
+        "release": release,
+        "command": " ".join(shlex.quote(part) for part in args),
+    }
+
+
+def helm_uninstall(release: str, namespace: str) -> str:
+    helm = require_helm()
+    release = allow_release(release)
+    namespace = allow_namespace(namespace)
+    args = [helm, "uninstall", release, "-n", namespace, "--wait", "--timeout", "4m"]
+    code, output = run(args, 300)
+    if code != 0:
+        if "not found" in output.lower():
+            raise LabError(f"{release} is not installed", 404)
+        raise LabError(output.strip() or "helm uninstall failed", 502)
+    return output
+
+
+def helm_get_values(release: str, namespace: str) -> dict | None:
+    """User-supplied values for a release, or None when it is not installed."""
+    helm = require_helm()
+    release = allow_release(release)
+    namespace = allow_namespace(namespace)
+    code, output = run([helm, "get", "values", release, "-n", namespace, "-o", "json"], 20)
+    if code != 0:
+        if "not found" in output.lower():
+            return None
+        raise LabError(output.strip() or "helm get values failed", 502)
+    if output.strip() in {"", "null"}:
+        return {}
+    parsed = _loads(output, "helm")
+    if not isinstance(parsed, dict):
+        raise LabError("helm values were not an object", 502)
+    return parsed
+
+
+def deploy(target_id: str, experiment: dict | None) -> dict:
+    _, target = target_from(target_id)
+    values_args, overlay_path = helm_values_args(target_id, target, experiment)
     try:
-        code, output = run(args, 300)
+        return helm_upgrade_install(RELEASE, target["namespace"], values_args)
     finally:
         if overlay_path:
             Path(overlay_path).unlink(missing_ok=True)
-    if code != 0:
-        raise LabError(output.strip() or "helm upgrade failed", 502)
-    return {"ok": True, "output": output, "namespace": target["namespace"], "command": " ".join(shlex.quote(part) for part in args)}
 
 
 def run_test(target_id: str) -> dict:
@@ -495,6 +714,250 @@ def rollback(target_id: str, revision: object) -> dict:
     return {"ok": True, "output": output}
 
 
+def stable_replica_count(target: dict) -> int:
+    values = helm_get_values(RELEASE, target["namespace"])
+    if isinstance(values, dict):
+        count = values.get("replicaCount")
+        if isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 20:
+            return count
+    text = _values_file(target).read_text(encoding="utf-8")
+    match = re.search(r"(?m)^replicaCount:\s*([0-9]+)\s*$", text)
+    if match is None:
+        raise LabError("stable replica count is unreadable", 502)
+    count = int(match.group(1))
+    if count > 20:
+        raise LabError("stable replica count is unreadable", 502)
+    return count
+
+
+def _release_installed(release: str, namespace: str) -> bool:
+    helm = require_helm()
+    code, output = run(
+        [helm, "status", allow_release(release), "-n", allow_namespace(namespace), "-o", "json"],
+        20,
+    )
+    if code == 0:
+        return True
+    if "not found" in output.lower():
+        return False
+    lowered = output.lower()
+    if "unreachable" in lowered or "connection refused" in lowered or "unable to connect" in lowered:
+        raise LabError(output.strip() or "cluster is not reachable", 503)
+    raise LabError(output.strip() or "helm status failed", 502)
+
+
+def deploy_canary(target_id: str, experiment: dict | None, weight: int) -> dict:
+    _, target = target_from(target_id)
+    weight = parse_weight(weight)
+    stable = stable_replica_count(target)
+    replicas = canary_replica_count(stable, weight)
+    intent = experiment.get("replicaCount") if experiment else None
+    overlay = render_canary_overlay(target_id, target, experiment, weight, replicas, intent)
+    values_args, overlay_path = helm_values_args(
+        target_id,
+        target,
+        None,
+        overlay=overlay,
+        prefix=f"canary-{target_id}",
+    )
+    try:
+        result = helm_upgrade_install(CANARY_RELEASE, target["namespace"], values_args)
+    finally:
+        if overlay_path:
+            Path(overlay_path).unlink(missing_ok=True)
+    result.update(
+        {
+            "weight": weight,
+            "replicas": replicas,
+            "stableReplicas": stable,
+            "host": canary_host(target_id),
+            "mode": "replica",
+        }
+    )
+    return result
+
+
+def canary_status(target_id: str) -> dict:
+    _, target = target_from(target_id)
+    namespace = target["namespace"]
+    base = {
+        "ok": True,
+        "release": CANARY_RELEASE,
+        "namespace": namespace,
+        "mode": "replica",
+        "host": canary_host(target_id),
+        "installed": False,
+        "pods": [],
+    }
+    try:
+        installed = _release_installed(CANARY_RELEASE, namespace)
+    except LabError as exc:
+        if exc.status == 503:
+            base["cluster"] = False
+            base["error"] = str(exc)
+            return base
+        raise
+    base["cluster"] = True
+    if not installed:
+        return base
+    values = helm_get_values(CANARY_RELEASE, namespace) or {}
+    annotations = values.get("podAnnotations") if isinstance(values.get("podAnnotations"), dict) else {}
+    weight_text = annotations.get("qa-lab/weight") if isinstance(annotations, dict) else None
+    intent_text = annotations.get("qa-lab/replica-intent") if isinstance(annotations, dict) else None
+    app = values.get("app") if isinstance(values.get("app"), dict) else {}
+    base.update(
+        {
+            "installed": True,
+            "weight": int(weight_text) if isinstance(weight_text, str) and weight_text.isdigit() else None,
+            "replicas": values.get("replicaCount") if isinstance(values.get("replicaCount"), int) else None,
+            "replicaIntent": int(intent_text) if isinstance(intent_text, str) and re.fullmatch(r"[1-6]", intent_text) else None,
+            "message": app.get("message") if isinstance(app.get("message"), str) else None,
+            "color": app.get("color") if isinstance(app.get("color"), str) else None,
+            "logLevel": app.get("logLevel") if isinstance(app.get("logLevel"), str) else None,
+            "pods": _pods(namespace, CANARY_RELEASE),
+        }
+    )
+    return base
+
+
+def promote_canary(target_id: str) -> dict:
+    _, target = target_from(target_id)
+    values = helm_get_values(CANARY_RELEASE, target["namespace"])
+    if values is None:
+        raise LabError("hello-lab-canary is not installed", 404)
+    experiment = experiment_from_canary_values(values)
+    upgraded = deploy(target_id, experiment)
+    uninstall = helm_uninstall(CANARY_RELEASE, target["namespace"])
+    return {
+        "ok": True,
+        "namespace": target["namespace"],
+        "release": RELEASE,
+        "promoted": experiment or {},
+        "output": upgraded["output"],
+        "uninstall": uninstall,
+    }
+
+
+def discard_canary(target_id: str) -> dict:
+    _, target = target_from(target_id)
+    output = helm_uninstall(CANARY_RELEASE, target["namespace"])
+    return {"ok": True, "namespace": target["namespace"], "release": CANARY_RELEASE, "output": output}
+
+
+def _pods(namespace: str, release: str) -> list[dict]:
+    kubectl = require_kubectl()
+    namespace = allow_namespace(namespace)
+    release = allow_release(release)
+    code, output = run(
+        [
+            kubectl,
+            "-n",
+            namespace,
+            "get",
+            "pods",
+            "-l",
+            "app.kubernetes.io/instance=" + release,
+            "-o",
+            "json",
+        ],
+        20,
+    )
+    if code != 0:
+        return []
+    payload = _loads(output, "kubectl")
+    pods = []
+    if isinstance(payload, dict):
+        for item in payload.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            statuses = item.get("status", {}).get("containerStatuses") or []
+            ready_count = sum(1 for container in statuses if isinstance(container, dict) and container.get("ready"))
+            restarts = sum(int(container.get("restartCount") or 0) for container in statuses if isinstance(container, dict))
+            pods.append(
+                {
+                    "name": item.get("metadata", {}).get("name", ""),
+                    "phase": item.get("status", {}).get("phase", ""),
+                    "ready": f"{ready_count}/{len(statuses)}" if statuses else "0/0",
+                    "restarts": restarts,
+                }
+            )
+    return pods
+
+
+def ephemeral_namespaces() -> list[str]:
+    kubectl = require_kubectl()
+    code, output = run([kubectl, "get", "namespaces", "-o", "json"], 20)
+    if code != 0:
+        raise LabError(output.strip() or "kubectl get namespaces failed", 502)
+    payload = _loads(output, "kubectl")
+    names: list[str] = []
+    if isinstance(payload, dict):
+        for item in payload.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("metadata", {}).get("name")
+            if ephemeral_namespace_ok(name):
+                names.append(name)
+    names.sort()
+    return names
+
+
+def list_ephemeral() -> dict:
+    return {"ok": True, "namespaces": ephemeral_namespaces(), "limit": MAX_EPHEMERAL}
+
+
+def ephemeral_target(namespace: str) -> dict:
+    namespace = require_ephemeral_namespace(namespace)
+    return {
+        "namespace": namespace,
+        "values_file": "values-dev.yaml",
+        "host": allow_host(f"hello-{namespace}.localtest.me"),
+        "environment": "staging",
+        "label": "Ephemeral",
+    }
+
+
+def create_ephemeral(experiment: dict | None) -> dict:
+    existing = ephemeral_namespaces()
+    ensure_ephemeral_capacity(len(existing))
+    namespace = ""
+    for _ in range(5):
+        candidate = "eph-" + secrets.token_hex(4)
+        if candidate not in existing and ephemeral_namespace_ok(candidate):
+            namespace = candidate
+            break
+    if not namespace:
+        raise LabError("could not allocate an ephemeral namespace", 500)
+    target = ephemeral_target(namespace)
+    overlay = render_override("ephemeral", target, experiment)
+    values_args, overlay_path = helm_values_args(
+        "ephemeral",
+        target,
+        experiment,
+        overlay=overlay,
+        prefix=namespace,
+    )
+    try:
+        result = helm_upgrade_install(RELEASE, namespace, values_args)
+    finally:
+        if overlay_path:
+            Path(overlay_path).unlink(missing_ok=True)
+    result.update({"host": target["host"], "limit": MAX_EPHEMERAL})
+    return result
+
+
+def delete_ephemeral(namespace: object) -> dict:
+    name = require_ephemeral_namespace(namespace)
+    kubectl = require_kubectl()
+    args = [kubectl, "delete", "namespace", name, "--wait=true", "--timeout=180s"]
+    code, output = run(args, 200)
+    if code != 0:
+        if "not found" in output.lower():
+            raise LabError("ephemeral namespace is not installed", 404)
+        raise LabError(output.strip() or "namespace delete failed", 502)
+    return {"ok": True, "namespace": name, "output": output}
+
+
 def health() -> dict:
     helm = tool("helm")
     kubectl = tool("kubectl")
@@ -503,6 +966,13 @@ def health() -> dict:
         code, _output = run([kubectl, "get", "--raw=/readyz"], 8)
         cluster = code == 0
     return {"ok": True, "helm": bool(helm), "kubectl": bool(kubectl), "cluster": cluster}
+
+
+def _required_target(body: dict) -> str:
+    if "target" not in body:
+        raise LabError("target must be dev, qa, or prod")
+    target_id, _target = target_from(body["target"])
+    return target_id
 
 
 def _json_body(handler: BaseHTTPRequestHandler) -> dict:
@@ -588,7 +1058,27 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/probe":
                 self._send(200, probe(self._query_target()))
                 return
+            if path == "/api/canary":
+                self._send(200, canary_status(self._query_target()))
+                return
+            if path == "/api/ephemeral":
+                self._send(200, list_ephemeral())
+                return
             self._send(404, {"ok": False, "error": "not found"})
+        except LabError as exc:
+            self._send(exc.status, {"ok": False, "error": str(exc)})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        try:
+            if self.headers.get("X-Requested-With") != REQUEST_HEADER:
+                raise LabError("missing QALab request header", 403)
+            if path != "/api/ephemeral":
+                self._send(404, {"ok": False, "error": "not found"})
+                return
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            namespace = (query.get("namespace") or [""])[0]
+            self._send(200, self._with_lock(lambda: delete_ephemeral(namespace)))
         except LabError as exc:
             self._send(exc.status, {"ok": False, "error": str(exc)})
 
@@ -596,6 +1086,34 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             body = self._guard_post()
+            if path == "/api/canary":
+                reject_unknown(body, {"target", "experiment", "weight"})
+                target_id = _required_target(body)
+                if "weight" not in body:
+                    raise LabError("weight must be an integer from 0 to 100")
+                experiment = parse_experiment(body.get("experiment"))
+                weight = parse_weight(body["weight"])
+                self._send(200, self._with_lock(lambda: deploy_canary(target_id, experiment, weight)))
+                return
+            if path == "/api/canary/promote":
+                reject_unknown(body, {"target"})
+                target_id = _required_target(body)
+                self._send(200, self._with_lock(lambda: promote_canary(target_id)))
+                return
+            if path == "/api/canary/discard":
+                reject_unknown(body, {"target"})
+                target_id = _required_target(body)
+                self._send(200, self._with_lock(lambda: discard_canary(target_id)))
+                return
+            if path == "/api/ephemeral":
+                reject_unknown(body, {"experiment"})
+                experiment = parse_experiment(body.get("experiment"))
+                self._send(200, self._with_lock(lambda: create_ephemeral(experiment)))
+                return
+            if path == "/api/ephemeral/delete":
+                reject_unknown(body, {"namespace"})
+                self._send(200, self._with_lock(lambda: delete_ephemeral(body.get("namespace"))))
+                return
             target_id, _target = target_from(body.get("target", "qa"))
             if path == "/api/preview":
                 experiment = parse_experiment(body.get("experiment"))

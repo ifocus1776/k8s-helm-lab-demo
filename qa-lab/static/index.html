@@ -173,6 +173,29 @@
       <p class="meta">This is the YAML Helm would apply. Review it before you deploy.</p>
       <div class="scroll tall"><pre id="manifests">Choose Review manifests to render the chart.</pre></div>
     </section>
+    <section id="canary">
+      <h2>Canary</h2>
+      <p class="meta">Deploys hello-lab-canary beside hello-lab in the selected namespace. Weight is a replica count, not a traffic split: the chart has no service mesh. The stable release stays as it is until you promote.</p>
+      <label for="weight">Weight <span>(0-100)</span></label>
+      <input id="weight" type="number" min="0" max="100" step="1" value="25">
+      <div class="actions">
+        <button type="button" class="primary" id="canary-deploy">Deploy canary</button>
+        <button type="button" id="canary-promote">Promote</button>
+        <button type="button" id="canary-discard">Discard</button>
+      </div>
+      <p class="meta" id="canary-status">Canary status not loaded.</p>
+      <div class="result" id="canary-result" role="status"></div>
+    </section>
+    <section id="ephemeral">
+      <h2>Ephemeral</h2>
+      <p class="meta">Creates a namespace on this k3s cluster and deploys hello-lab with the QA values file. Delete removes only namespaces named eph- plus 8 hex characters. At most three exist at once.</p>
+      <div class="actions">
+        <button type="button" class="primary" id="eph-create">Create ephemeral</button>
+        <button type="button" id="eph-refresh">Refresh list</button>
+      </div>
+      <div id="eph-list" class="meta">No ephemeral namespaces loaded.</div>
+      <div class="result" id="eph-result" role="status"></div>
+    </section>
     <section>
       <h2>Release history</h2>
       <div id="history" class="meta">No history yet.</div>
@@ -322,6 +345,140 @@
       }
     }
 
+    function weightFromForm() {
+      const raw = $("weight").value.trim();
+      if (!/^(100|[0-9]{1,2})$/.test(raw)) {
+        throw new Error("Weight must be an integer from 0 to 100.");
+      }
+      return Number(raw);
+    }
+
+    async function refreshCanary() {
+      try {
+        const payload = await api("/api/canary?target=" + encodeURIComponent(state.target));
+        if (payload.cluster === false) {
+          $("canary-status").textContent = payload.error || "Cluster is not reachable.";
+          return;
+        }
+        if (!payload.installed) {
+          $("canary-status").textContent = "No hello-lab-canary release in " + payload.namespace + ".";
+          return;
+        }
+        const weight = payload.weight === null || payload.weight === undefined ? "unknown" : String(payload.weight);
+        const replicas = payload.replicas === null || payload.replicas === undefined ? "unknown" : String(payload.replicas);
+        const message = payload.message ? " Message: " + payload.message + "." : "";
+        $("canary-status").textContent = "Replica canary " + payload.release + " in " + payload.namespace + " at weight " + weight + " (" + replicas + " replicas)." + message;
+      } catch (error) {
+        $("canary-status").textContent = error.message;
+      }
+    }
+
+    function renderEphemeral(namespaces) {
+      const root = $("eph-list");
+      root.replaceChildren();
+      if (!namespaces.length) {
+        root.textContent = "No ephemeral namespaces.";
+        return;
+      }
+      namespaces.forEach((namespace) => {
+        const row = document.createElement("div");
+        row.className = "actions";
+        const text = document.createElement("span");
+        text.textContent = namespace + " · http://hello-" + namespace + ".localtest.me/";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Delete";
+        button.addEventListener("click", () => deleteEphemeral(namespace));
+        row.append(text, button);
+        root.append(row);
+      });
+    }
+
+    async function refreshEphemeral() {
+      try {
+        const payload = await api("/api/ephemeral");
+        renderEphemeral(payload.namespaces || []);
+      } catch (error) {
+        $("eph-list").textContent = error.message;
+      }
+    }
+
+    async function deployCanary() {
+      setBusy(true);
+      setResult("canary-result", "Deploying canary…");
+      try {
+        const payload = await api("/api/canary", {
+          target: state.target,
+          experiment: experimentFromForm(),
+          weight: weightFromForm(),
+        });
+        setResult("canary-result", "Canary " + payload.release + " is in " + payload.namespace + " with " + payload.replicas + " replicas (weight " + payload.weight + "). Stable release was not changed.", "ok");
+        await refreshCanary();
+      } catch (error) {
+        setResult("canary-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function promoteCanary() {
+      setBusy(true);
+      setResult("canary-result", "Promoting canary onto the stable release…");
+      try {
+        await api("/api/canary/promote", { target: state.target });
+        setResult("canary-result", "Promoted the canary values onto hello-lab and uninstalled hello-lab-canary.", "ok");
+        await refreshCanary();
+        await refreshStatus();
+        await refreshHistory();
+      } catch (error) {
+        setResult("canary-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function discardCanary() {
+      setBusy(true);
+      setResult("canary-result", "Discarding canary…");
+      try {
+        await api("/api/canary/discard", { target: state.target });
+        setResult("canary-result", "Uninstalled hello-lab-canary. The stable release was left in place.", "ok");
+        await refreshCanary();
+      } catch (error) {
+        setResult("canary-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function createEphemeral() {
+      setBusy(true);
+      setResult("eph-result", "Creating ephemeral namespace…");
+      try {
+        const payload = await api("/api/ephemeral", { experiment: experimentFromForm() });
+        setResult("eph-result", "Created " + payload.namespace + " at http://" + payload.host + "/.", "ok");
+        await refreshEphemeral();
+      } catch (error) {
+        setResult("eph-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function deleteEphemeral(namespace) {
+      setBusy(true);
+      setResult("eph-result", "Deleting " + namespace + "…");
+      try {
+        await api("/api/ephemeral/delete", { namespace: namespace });
+        setResult("eph-result", "Deleted " + namespace + ".", "ok");
+        await refreshEphemeral();
+      } catch (error) {
+        setResult("eph-result", error.message, "bad");
+      } finally {
+        setBusy(false);
+      }
+    }
+
     function setBusy(busy) {
       state.busy = busy;
       document.querySelectorAll("button").forEach((button) => {
@@ -412,6 +569,8 @@
       await refreshHealth();
       await refreshStatus();
       await refreshHistory();
+      await refreshCanary();
+      await refreshEphemeral();
     }
 
     document.querySelectorAll(".targets button").forEach((button) => {
@@ -424,6 +583,7 @@
         setResult("check-result", "");
         await refreshStatus();
         await refreshHistory();
+        await refreshCanary();
       });
     });
     $("review").addEventListener("click", review);
@@ -431,12 +591,26 @@
     $("deploy-committed").addEventListener("click", () => deploy(true));
     $("test").addEventListener("click", runTest);
     $("probe").addEventListener("click", () => checkApp(true));
+    $("canary-deploy").addEventListener("click", deployCanary);
+    $("canary-promote").addEventListener("click", promoteCanary);
+    $("canary-discard").addEventListener("click", discardCanary);
+    $("eph-create").addEventListener("click", createEphemeral);
+    $("eph-refresh").addEventListener("click", async () => {
+      setBusy(true);
+      try {
+        await refreshEphemeral();
+      } finally {
+        setBusy(false);
+      }
+    });
     $("refresh").addEventListener("click", async () => {
       setBusy(true);
       try {
         await refreshHealth();
         await refreshStatus();
         await refreshHistory();
+        await refreshCanary();
+        await refreshEphemeral();
       } finally {
         setBusy(false);
       }
